@@ -29,7 +29,8 @@ let sessionID = null;
 // 이미지 첨부 + 비전 모델 자동 전환
 const attachedImages = []; // { mime, dataUrl, name }
 let defaultModel = "";          // opencode.json top-level model
-const visionModels = new Set(); // attachment:true 모델("providerID/modelID")
+const visionModels = new Set(); // 이미지 입력 가능 모델("providerID/modelID")
+const toolModels = new Set();   // tool-calling 가능 모델
 let autoSwitchedFrom = null;     // 이미지 때문에 자동 전환했다면 직전 선택값 보관
 let activeTab = null;
 const roleByMsg = {};      // messageID -> "user" | "assistant"
@@ -268,6 +269,7 @@ async function fetchModels() {
   let list = [];
   defaultModel = "";
   visionModels.clear();
+  toolModels.clear();
   try {
     const conf = await api("/config", { method: "GET" });
     defaultModel = (conf && conf.model) || "";
@@ -276,8 +278,13 @@ async function fetchModels() {
       const models = (prov[pid] && prov[pid].models) || {};
       for (const mid of Object.keys(models)) {
         const id = pid + "/" + mid;
+        const mc = models[mid] || {};
         list.push(id);
-        if (models[mid] && models[mid].attachment === true) visionModels.add(id);
+        // 비전: modalities.input에 image 포함 또는 attachment 플래그
+        const inputMods = (mc.modalities && mc.modalities.input) || [];
+        if (mc.attachment === true || inputMods.includes("image")) visionModels.add(id);
+        // 도구: tool_call 플래그(미설정이면 기본 가능으로 간주)
+        if (mc.tool_call !== false) toolModels.add(id);
       }
     }
   } catch { /* 목록 못 받아도 '기본값'으로 동작 */ }
@@ -305,7 +312,12 @@ function setModelSelection(value) {
 }
 function effectiveModel() { return selectedModel || defaultModel; }
 function isVisionModel(m) { return !!m && visionModels.has(m); }
-function firstVisionModel() { return visionModels.values().next().value || ""; }
+function isToolModel(m) { return !!m && toolModels.has(m); }
+// 비전 모델 중 도구(tool-calling)까지 되는 모델을 우선 선택(qwen3-vl 등)
+function firstVisionModel() {
+  for (const m of visionModels) if (toolModels.has(m)) return m; // vision+tools 우선
+  return visionModels.values().next().value || "";              // 없으면 vision-only
+}
 function maybeAutoSwitchVision() {
   if (!attachedImages.length || isVisionModel(effectiveModel())) return;
   const vm = firstVisionModel();
@@ -460,9 +472,12 @@ async function send() {
     setModelSelection(autoSwitchedFrom);
     autoSwitchedFrom = null;
   }
-  // 텍스트 모델: 탭 맥락 주입(브라우저 작업). 이미지 첨부(비전): 도구 미사용이라 액션 프리픽스 생략.
+  // 유효 모델이 도구(tool-calling)를 지원하는지 — 이미지+도구 동시 수행 가능 여부 결정
+  const toolsOn = isToolModel(effectiveModel());
+  // 도구 가능 모델이면(이미지 유무 무관) 탭 맥락을 주입해 실제 브라우저 작업 수행.
+  // 도구 미지원 비전 모델은 분석 전용이라 액션 프리픽스 생략.
   let prompt = userText;
-  if (!hasImages && activeTab && activeTab.tabId != null) {
+  if (toolsOn && activeTab && activeTab.tabId != null) {
     prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
   }
   lastSentText = prompt;
@@ -472,9 +487,9 @@ async function send() {
   for (const img of imgsSnapshot) {
     parts.push({ type: "file", mime: img.mime, url: img.dataUrl, filename: img.name });
   }
-  // 이미지 첨부 시: 비전 모델은 tool-calling 미지원일 수 있어 도구 비활성화(분석 전용)
+  // 도구 미지원 모델만 도구 비활성화(환각 방지·분석 전용). 도구 가능 모델은 켜둬 vision+tools 동시.
   const reqBody = { ...modelParam(), parts };
-  if (hasImages) reqBody.tools = { "*": false };
+  if (!toolsOn) reqBody.tools = { "*": false };
   const body = JSON.stringify(reqBody);
   // 첨부 비우기(UI 즉시 정리). 모델 복귀는 전송 후.
   attachedImages.length = 0;

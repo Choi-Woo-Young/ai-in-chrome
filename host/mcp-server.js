@@ -454,9 +454,14 @@ function writeAudit(entry) {
   } catch { /* 감사 실패가 도구 실행을 막지 않도록 무시 */ }
 }
 
-// --- 하이브리드 비전: 텍스트 두뇌가 필요할 때만 호출하는 화면 묘사 (PoC: ollama, 폐쇄망: vLLM로 교체) ---
-const VL_ENDPOINT = process.env.OCIC_VL_ENDPOINT || "http://localhost:11434/api/chat";
-const VL_MODEL = process.env.OCIC_VL_MODEL || "qwen2.5vl:7b";
+// --- 하이브리드 비전: 텍스트 두뇌가 필요할 때만 호출하는 화면 묘사 ---
+// PoC 기본: ollama 네이티브 포맷. OCIC_VL_FORMAT=openai 면 OpenAI(또는 OpenAI 호환 vLLM) 포맷.
+const VL_FORMAT = (process.env.OCIC_VL_FORMAT || "ollama").toLowerCase();
+const VL_ENDPOINT = process.env.OCIC_VL_ENDPOINT
+  || (VL_FORMAT === "openai" ? "https://api.openai.com/v1/chat/completions" : "http://localhost:11434/api/chat");
+const VL_MODEL = process.env.OCIC_VL_MODEL || (VL_FORMAT === "openai" ? "gpt-4o" : "qwen2.5vl:7b");
+const VL_API_KEY = process.env.OCIC_VL_API_KEY || process.env.OPENAI_API_KEY || "";
+const VL_PROMPT = "이 화면에 무엇이 보이는지, 클릭 가능한 요소와 대략적 위치를 한국어로 간결히 설명해줘.";
 
 async function describeScreen(tabId, question) {
   // 1) 확장에서 스크린샷 캡처(읽기 액션 → 승인 게이트 비대상)
@@ -464,22 +469,35 @@ async function describeScreen(tabId, question) {
   const imgPart = shot?.content?.find((c) => c.type === "image");
   if (!imgPart || !imgPart.data) throw new Error("스크린샷 캡처 실패");
   // 2) 비전 모델에 이미지+질문 전송 (이미지는 두뇌를 거치지 않고 여기서 텍스트로 변환)
-  const resp = await fetch(VL_ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+  const headers = { "Content-Type": "application/json" };
+  let body;
+  if (VL_FORMAT === "openai") {
+    if (VL_API_KEY) headers["Authorization"] = `Bearer ${VL_API_KEY}`;
+    body = {
       model: VL_MODEL,
       messages: [{
         role: "user",
-        content: question || "이 화면에 무엇이 보이는지, 클릭 가능한 요소와 대략적 위치를 한국어로 간결히 설명해줘.",
-        images: [imgPart.data],
+        content: [
+          { type: "text", text: question || VL_PROMPT },
+          // 스크린샷은 JPEG 불변식(CLAUDE.md)
+          { type: "image_url", image_url: { url: `data:image/jpeg;base64,${imgPart.data}` } },
+        ],
       }],
+    };
+  } else {
+    body = {
+      model: VL_MODEL,
+      messages: [{ role: "user", content: question || VL_PROMPT, images: [imgPart.data] }],
       stream: false,
-    }),
-  });
+    };
+  }
+  const resp = await fetch(VL_ENDPOINT, { method: "POST", headers, body: JSON.stringify(body) });
   if (!resp.ok) throw new Error(`비전 모델 호출 실패: HTTP ${resp.status}`);
   const data = await resp.json();
-  return (data && data.message && data.message.content) || "(비전 모델 응답 없음)";
+  const text = VL_FORMAT === "openai"
+    ? data?.choices?.[0]?.message?.content
+    : data?.message?.content;
+  return text || "(비전 모델 응답 없음)";
 }
 
 async function callTool(toolName, args) {
