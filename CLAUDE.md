@@ -42,7 +42,19 @@ These are load-bearing — past commits fixed subtle bugs here. Don't regress th
 
 ## Stubbed Tools
 
-All 18 tools are declared, but these return "not supported" stubs in `background.js`: `gif_creator`, `shortcuts_list`, `shortcuts_execute`, `switch_browser`, and `upload_image` (partial). `update_plan` is auto-approved (no permission system). Real implementations: `tabs_context_mcp`, `tabs_create_mcp`, `navigate`, `computer` (13 actions), `read_page`, `get_page_text`, `find`, `form_input`, `javascript_tool`, `read_console_messages`, `read_network_requests`, `resize_window`.
+All 18 tools are declared, but these return "not supported" stubs in `background.js`: `gif_creator`, `shortcuts_list`, `shortcuts_execute`, `switch_browser`, and `upload_image` (partial). Real implementations: `tabs_context_mcp`, `tabs_create_mcp`, `navigate`, `computer` (13 actions), `read_page`, `get_page_text`, `find`, `form_input`, `javascript_tool`, `read_console_messages`, `read_network_requests`, `resize_window`. (`update_plan` is no longer a pure no-op — it now records approved domains for the air-gap approval gate; see below.)
+
+## Air-gap customizations (live in the code — change runtime behavior)
+
+This repo is also an **air-gapped enterprise fork**. The full design/decisions live in `custom/` (the source of truth is `custom/05-확정-아키텍처-opencode-및-PoC.md`; `custom/검토-종합-보고서.md` is the consolidated overview). The target runs **opencode** (not Claude Code) as the agent, connected to a self-hosted vLLM (gpt-oss / Qwen3) over the OpenAI API. `custom/poc/` holds a working opencode config (`opencode.json` registers this MCP server + a local ollama provider; `AGENTS.md` enforces a text-first policy).
+
+Three security patches are **already merged and active** — they intentionally diverge from upstream/official behavior. If a tool returns an unexpected "미승인"/"차단됨" message, this is why:
+
+- **Approval gate + auto-run** (`background.js`, `ENFORCE_APPROVAL = true`): `update_plan(domains)` records hosts into the `approvedDomains` set. **Write tools are blocked on unapproved domains** and return a "미승인" message instead of executing — `navigate` checks the *target* host; `computer` (only write actions: clicks/`type`/`key`/`left_click_drag`), `form_input`, and `javascript_tool` check the tab's *current* host via `writeGate(tabId)`. **Read tools are always allowed** (`read_page`, `get_page_text`, `find`, screenshot, etc.). So a fresh `navigate` to a new domain fails until `update_plan` approves it; once approved the domain auto-runs (no re-approval). Set `ENFORCE_APPROVAL = false` to disable.
+- **Domain blocklist hook** (`background.js`, `BLOCKED_HOSTS = []`): empty by default (blocks nothing — the feature is wired but the list is intentionally empty). `navigate` and `writeGate` reject any host in the list (subdomain-aware). Add hosts to enforce.
+- **Audit logging** (`mcp-server.js`, in `callTool`): every tool call is appended as one JSON line to `~/.config/open-claude-in-chrome/logs/audit-YYYY-MM-DD.jsonl` (mode `0600`), capturing tool, arg summary (incl. `javascript_tool` source), result snippet, and timing. The MCP server is the chokepoint, so blocked/denied outcomes are logged too.
+
+`javascript_tool` is deliberately **not** restricted (full arbitrary JS retained) beyond the approval gate + audit. Local TCP auth was intentionally skipped (target is 1-user-per-VDI).
 
 ## Setup / Development Workflow
 
