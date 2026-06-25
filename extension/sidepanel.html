@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open Claude in Chrome</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="icons/icon16.png" alt="" width="16" height="16" />
+      <span>Open Claude</span>
+    </div>
+    <select id="modelSelect" class="model-select" title="두뇌 모델 선택">
+      <option value="">기본값</option>
+    </select>
+    <div class="status" id="status" title="opencode 서버 연결 상태">연결 중…</div>
+  </header>
+
+  <main id="messages" class="messages" aria-live="polite"></main>
+
+  <footer class="composer">
+    <div class="warn" id="warn" hidden>⚠️ <strong>묻지 않고 실행</strong> — 모든 브라우저 작업이 승인 없이 자동 실행됩니다. (정책 차단 도메인은 계속 차단)</div>
+    <div class="ctx" id="ctx" title="현재 페이지 맥락"></div>
+    <div class="inputrow">
+      <textarea id="input" rows="1" placeholder="이 페이지에 대해 무엇이든 물어보세요… (예: 이 페이지 요약해줘)"></textarea>
+      <button id="send" title="보내기 (Enter)">➤</button>
+    </div>
+    <div class="modebar">
+      <button class="mode-toggle" id="modeToggle" type="button">
+        <span class="mode-icon" id="modeIcon">✋</span>
+        <span class="mode-text" id="modeText">실행 전 확인</span>
+        <span class="mode-caret">⌄</span>
+      </button>
+      <div class="mode-menu" id="modeMenu" hidden>
+        <div class="mode-item" data-mode="confirm">
+          <div class="mode-item-title">✋ 실행 전 확인 <span class="check">✓</span></div>
+          <div class="mode-item-desc">미승인 도메인 작업 전에 승인을 요청합니다.</div>
+        </div>
+        <div class="mode-item" data-mode="auto">
+          <div class="mode-item-title">▷▷ 묻지 않고 실행 <span class="check">✓</span></div>
+          <div class="mode-item-desc">승인 없이 모든 작업을 자동 실행합니다.</div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

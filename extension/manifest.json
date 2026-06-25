@@ -13,11 +13,18 @@
     "tabGroups",
     "windows",
     "storage",
-    "alarms"
+    "alarms",
+    "sidePanel"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
+  "action": {
+    "default_title": "Open Claude in Chrome"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "background": {
     "service_worker": "background.js"
   },

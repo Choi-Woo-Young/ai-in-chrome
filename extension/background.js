@@ -25,6 +25,8 @@ const BLOCKED_HOSTS = [];
 //     미승인 도메인은 승인 요청. ENFORCE_APPROVAL=false면 게이트 비활성(전부 허용).
 const ENFORCE_APPROVAL = true;
 const approvedDomains = new Set();
+// "묻지 않고 실행" 모드: 켜면 승인 게이트를 건너뜀(미승인 도메인도 자동 실행). 단 BLOCKED_HOSTS 정책은 유지.
+let autoApprove = false;
 
 function hostOfUrl(u) { try { return new URL(u).hostname; } catch { return null; } }
 function isBlockedHost(h) { return !!h && BLOCKED_HOSTS.some((b) => h === b || h.endsWith("." + b)); }
@@ -38,7 +40,7 @@ async function writeGate(tabId) {
   if (isBlockedHost(host)) {
     return { content: [{ type: "text", text: `차단됨: "${host}" 은(는) 사내 정책상 접근 불가 도메인입니다.` }] };
   }
-  if (ENFORCE_APPROVAL && !isApprovedHost(host)) {
+  if (ENFORCE_APPROVAL && !autoApprove && !isApprovedHost(host)) {
     return { content: [{ type: "text", text: `도메인 "${host}" 미승인. 쓰기 작업 전에 update_plan(domains:["${host}"])으로 승인을 요청하세요. 승인 후에는 해당 도메인에서 자동 실행됩니다.` }] };
   }
   return null;
@@ -455,7 +457,7 @@ const toolHandlers = {
       if (isBlockedHost(targetHost)) {
         return { content: [{ type: "text", text: `차단됨: "${targetHost}" 은(는) 사내 정책상 접근 불가 도메인입니다.` }] };
       }
-      if (ENFORCE_APPROVAL && !isApprovedHost(targetHost)) {
+      if (ENFORCE_APPROVAL && !autoApprove && !isApprovedHost(targetHost)) {
         return { content: [{ type: "text", text: `도메인 "${targetHost}" 미승인. update_plan(domains:["${targetHost}"])으로 먼저 승인하세요. 승인 후 해당 도메인은 자동 실행됩니다.` }] };
       }
       await chrome.tabs.update(tabId, { url: targetUrl });
@@ -982,6 +984,39 @@ async function recoverTabGroupState() {
     // Not critical — will be set on first tabs_context_mcp call
   }
 }
+
+// --- 사이드패널(채팅 UI) 지원 ---
+// 툴바 아이콘 클릭 시 사이드패널 열기
+if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {
+  chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});
+}
+// 사이드패널이 현재 활성 탭 정보를 요청할 때 응답
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message && message.type === "sidepanel_get_active_tab") {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+      const t = tabs && tabs[0];
+      sendResponse(t ? { tabId: t.id, url: t.url || "", title: t.title || "" } : null);
+    }).catch(() => sendResponse(null));
+    return true; // async response
+  }
+  // 사이드패널의 승인 버튼 → 도메인을 세션 승인 목록에 직접 추가(승인 게이트와 동일 set)
+  if (message && message.type === "sidepanel_approve_domain" && message.host) {
+    const h = String(message.host).replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase().trim();
+    if (h) approvedDomains.add(h);
+    sendResponse({ ok: true, approved: [...approvedDomains] });
+    return true;
+  }
+  // "묻지 않고 실행" 모드 토글
+  if (message && message.type === "sidepanel_set_auto_approve") {
+    autoApprove = !!message.on;
+    sendResponse({ ok: true, autoApprove });
+    return true;
+  }
+  if (message && message.type === "sidepanel_get_auto_approve") {
+    sendResponse({ autoApprove });
+    return true;
+  }
+});
 
 recoverTabGroupState();
 connectNativeHost();
