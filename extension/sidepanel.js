@@ -474,11 +474,18 @@ async function send() {
   }
   // 유효 모델이 도구(tool-calling)를 지원하는지 — 이미지+도구 동시 수행 가능 여부 결정
   const toolsOn = isToolModel(effectiveModel());
-  // 도구 가능 모델이면(이미지 유무 무관) 탭 맥락을 주입해 실제 브라우저 작업 수행.
-  // 도구 미지원 비전 모델은 분석 전용이라 액션 프리픽스 생략.
+  // 프롬프트 구성: 텍스트 턴 / 이미지 턴을 분리한다.
+  //  - 텍스트 턴 + 도구 모델: "이 탭에서 작업" 프리픽스(브라우저 자동화가 목적).
+  //  - 이미지 턴 + 도구 모델: 첨부 이미지를 주체로, 탭은 참고로, 도구는 선택으로. (요약/분석은 도구 없이 바로,
+  //    "이미지 속 X 클릭" 같은 요청만 도구 사용 → 스크린샷을 다시 navigate/read_page로 재구성하는 오작동 방지.)
+  //  - 도구 미지원 비전 모델: raw userText(아래에서 도구 비활성).
   let prompt = userText;
   if (toolsOn && activeTab && activeTab.tabId != null) {
-    prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
+    if (hasImages) {
+      prompt = `[참고: 현재 탭 tabId=${activeTab.tabId}, url=${activeTab.url}] 아래 요청은 첨부된 이미지에 대한 것이다. 먼저 첨부 이미지를 직접 보고 답하라. 페이지를 실제로 조작해야 하는 요청일 때만 브라우저 도구를 사용하라. 요청: ${userText}`;
+    } else {
+      prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
+    }
   }
   lastSentText = prompt;
 
