@@ -37,7 +37,8 @@ These are load-bearing — past commits fixed subtle bugs here. Don't regress th
 - **`deviceScaleFactor: 1` is forced** via `Emulation.setDeviceMetricsOverride` in `ensureAttached` (background.js). Without it, Retina screenshots come back 2× and every click coordinate is wrong. Screenshots are captured in CSS pixels to match `Input.dispatchMouseEvent`'s coordinate space.
 - **Screenshots are JPEG-only**, quality 55 (drops to 30 if >500KB base64), capped, and the store keeps only the last 10. This is deliberate to control MCP payload size — don't switch to PNG or raise quality casually.
 - **Tool output formats must match the official Claude in Chrome** (`read_page`, screenshot response strings, etc.). Several commits exist solely to achieve parity.
-- **`isInGroup()` always re-queries live `chrome.tabs` state** rather than trusting in-memory `tabGroupTabs`, because the MV3 service worker can be killed and restarted mid-session (state recovered via `recoverTabGroupState()` and the `keepalive` alarm).
+- **`isInGroup()` always re-queries live `chrome.tabs` state** rather than trusting in-memory `tabGroupTabs`, because the MV3 service worker can be killed and restarted mid-session (state recovered via `recoverTabGroupState()` and the `keepalive` alarm). The agent's tab group is titled by the `GROUP_TITLE` constant (`"Claude"`) — `isInGroup` recovery and `recoverTabGroupState` match on it, so changing the title means changing the constant (one place).
+- **Two ways the agent's tab group gets its first tab.** CLI/terminal use has no "current tab", so `ensureTabGroup(true)` opens a **new window** (`chrome.windows.create`) and groups it. The side panel instead calls `adoptTabIntoGroup(tabId)` to fold the user's **current active tab into the group in place** (same window, no new window) — this mirrors the official extension's "main tab = where the side panel opened". Don't make `ensureTabGroup` adopt the active tab; keep the two paths separate.
 - Naming: the native messaging host id is `com.anthropic.open_claude_in_chrome`. The default port is `18765`, overridable via `~/.config/open-claude-in-chrome/config.json` (`{"port": ...}`) — change it in **both** `mcp-server.js` and `native-host.js` if hardcoding anywhere.
 
 ## Stubbed Tools
@@ -58,6 +59,16 @@ Three security patches are **already merged and active** — they intentionally 
 
 A **19th tool — `describe_screen(tabId, question)`** (mcp-server.js) — is added for the hybrid-vision pattern: the text "brain" model (Qwen3) stays in charge and calls this only when the accessibility tree (`read_page`/`find`) is insufficient. The MCP server captures a screenshot, sends it to a vision model (`OCIC_VL_ENDPOINT`/`OCIC_VL_MODEL`, default ollama `qwen2.5vl:7b`; point at vLLM in the closed network), and returns **text only** — so the image never enters the brain's context and any text model can use it. It's read-only (not approval-gated) but is audited. PoC validated on Mac (M4 Pro 48GB) with opencode as the agent.
 
+## Side panel (browser chat UI)
+
+`extension/sidepanel.{html,js,css}` add a **second entry point** alongside the opencode CLI: an in-browser chat panel for non-technical users. It is a **thin client** — it does **not** call MCP tools or the native host. It talks over HTTP to a background `opencode serve` (default `127.0.0.1:7777`, streamed via SSE `/event`); opencode is the brain and calls the MCP tools, so every security gate, audit log, and tab rule above applies unchanged. Manifest gains the `sidePanel` permission + `side_panel.default_path`; `background.js` opens it via `chrome.sidePanel.setPanelBehavior({openPanelOnActionClick:true})`.
+
+- **Requires** `opencode serve --hostname 127.0.0.1 --port 7777 --cors chrome-extension://<id>` running, using `custom/poc/opencode.json` (provider + this MCP server + `AGENTS.md`). After editing `opencode.json`/`AGENTS.md`, restart `opencode serve`; after editing `sidepanel.*` or `background.js`, reload the extension.
+- **Model picker** reads `GET /config` `provider.{id}.models`. The sidebar classifies each model: **vision** if `modalities.input` includes `"image"` (or `attachment:true`), **tool-capable** if `tool_call !== false`. Attaching an image auto-switches to a vision model (preferring one that is *also* tool-capable) and restores the prior model on the next text-only turn.
+- **Image attachment** (drag / paste / file-picker) → data URL → opencode `file` parts. For tool-capable vision models, tools stay **enabled** (vision + tool-calling in one turn); analysis-only vision models get `tools:{"*":false}`. Image turns use an image-first prompt so the model describes the attachment instead of re-fetching the page it depicts.
+- **Current-tab operation**: on a tool-capable send, the sidebar calls the `sidepanel_adopt_active_tab` message → `adoptTabIntoGroup` (see Invariants) so the agent acts in the tab the user is viewing. Other `sidepanel_*` handlers in `background.js`: `sidepanel_get_active_tab` (read-only context), `sidepanel_approve_domain` / `sidepanel_set_auto_approve` (drive the approval gate from the UI's "묻지 않고 실행" toggle).
+- **Vision serving** is OpenAI-`/v1` `image_url` on both targets, differing only by `opencode.json`/env: Mac = ollama, internal = vLLM Qwen3-VL (`--tool-call-parser qwen3_xml --enable-auto-tool-choice`). **Gotcha (Mac/ollama):** a 30B VL loaded at its stock 262144 context OOMs Metal and returns empty 200s (`Insufficient Memory` in `~/.ollama/logs/server.log`); the PoC uses a derived model `qwen3-vl:browser` (`ollama create … PARAMETER num_ctx 65536`). vLLM caps context with `--max-model-len`, so this gotcha is Mac-only.
+
 ## Setup / Development Workflow
 
 ```bash
@@ -72,9 +83,10 @@ claude mcp add open-claude-in-chrome -- node "$(pwd)/host/mcp-server.js"
 
 | Changed file | Action |
 |---|---|
-| `extension/*.js` or `manifest.json` | Reload extension in `chrome://extensions` (reload icon) |
+| `extension/*.js` (incl. `sidepanel.js`) or `manifest.json` | Reload extension in `chrome://extensions` (reload icon) |
 | `host/mcp-server.js` | `pkill -f "node.*mcp-server"`, then `/mcp` in Claude Code |
 | `host/native-host.js` | Restart the browser (close **all** windows) — it's relaunched by the browser |
+| `custom/poc/opencode.json` or `AGENTS.md` | Restart `opencode serve` (it reads them at startup / per session) |
 | `install.sh` / host name | Re-run `./install.sh <id>`, restart browser, re-add MCP |
 
 ### Debugging
