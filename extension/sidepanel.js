@@ -186,6 +186,8 @@ function addError(text) {
 let workingEl = null;
 let workingSince = 0;
 let workingTimer = null;
+let statusPollTimer = null;   // SSE 종료 이벤트 유실 대비 백스톱 폴링
+let sawAssistantPart = false; // 이번 턴에 assistant 파트(텍스트/도구)가 렌더됐는지
 function setWorking(on, label) {
   if (on) {
     clearEmpty();
@@ -196,6 +198,8 @@ function setWorking(on, label) {
       workingSince = Date.now();
       if (!workingTimer) workingTimer = setInterval(updateWorkingTime, 1000);
     }
+    // EventSource 재연결 구간에 종료 이벤트가 유실돼도 스피너가 멈추지 않도록 서버 상태를 주기 확인
+    if (!statusPollTimer) statusPollTimer = setInterval(pollSessionStatus, 4000);
     if (label) workingEl.querySelector(".working-label").textContent = label;
     else if (!workingEl.querySelector(".working-label").textContent) workingEl.querySelector(".working-label").textContent = "생각 중…";
     els.messages.appendChild(workingEl); // 항상 맨 아래로
@@ -204,7 +208,23 @@ function setWorking(on, label) {
   } else {
     if (workingEl) { workingEl.remove(); workingEl = null; }
     if (workingTimer) { clearInterval(workingTimer); workingTimer = null; }
+    if (statusPollTimer) { clearInterval(statusPollTimer); statusPollTimer = null; }
+    sawAssistantPart = false;
   }
+}
+// 서버의 권위 상태로 스피너를 보정. /session/status 맵에는 idle이 아닌 세션만 존재(없으면 idle).
+async function pollSessionStatus() {
+  if (!workingEl || !sessionID) return;
+  let map;
+  try { map = await api("/session/status"); } catch { return; } // 일시 장애: 다음 틱에 재시도
+  const st = map && map[sessionID];
+  const busy = st && (st.type === "busy" || st.type === "retry"); // retry도 작업 중으로 간주
+  if (busy) return;
+  // 서버상 idle. 턴이 실제 진행됐다는 근거가 있을 때만 종료:
+  //  - assistant 파트가 이미 렌더됐거나(1890s 케이스), 또는
+  //  - 시작 직후 race(서버가 아직 busy로 마킹 전)를 배제할 만큼 시간이 지난 경우
+  const elapsedMs = Date.now() - workingSince;
+  if (sawAssistantPart || elapsedMs > 12000) setWorking(false);
 }
 function updateWorkingTime() {
   if (!workingEl) return;
@@ -359,7 +379,7 @@ function renderThumbs() {
 
 function connectEvents() {
   const ev = new EventSource(cfg.opencodeUrl + "/event");
-  ev.onopen = () => setStatus("연결됨", "ok");
+  ev.onopen = () => { setStatus("연결됨", "ok"); if (workingEl) pollSessionStatus(); };
   ev.onerror = () => setStatus("서버 연결 끊김 — opencode serve 확인", "err");
   ev.onmessage = (e) => {
     let msg;
@@ -369,7 +389,7 @@ function connectEvents() {
 
     // 세션 작업 상태 → busy면 스피너 ON, 아니면(턴 종료) OFF
     if (msg.type === "session.status") {
-      if (p.status && p.status.type === "busy") setWorking(true);
+      if (p.status && (p.status.type === "busy" || p.status.type === "retry")) setWorking(true);
       else setWorking(false);
       return;
     }
@@ -400,10 +420,12 @@ function connectEvents() {
         return;
       }
       if (part.type === "text") {
+        sawAssistantPart = true;
         renderTextPart(part);
         setWorking(true, "답변 작성 중…");
         keepWorkingLast();
       } else if (part.type === "tool") {
+        sawAssistantPart = true;
         renderToolPart(part);
       }
       // reasoning/step-* 등 기타 파트는 v1에서 생략
