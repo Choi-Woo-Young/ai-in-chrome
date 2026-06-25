@@ -17,6 +17,33 @@ const consoleMessages = new Map(); // tabId -> [{level, text, timestamp, url}]
 const networkRequests = new Map(); // tabId -> [{url, method, status, type, timestamp}]
 const screenshotStore = new Map(); // imageId -> base64
 
+// --- 사내 보안 정책 ---
+// (1) 블록리스트: 차단할 호스트(서브도메인 포함). 비어 있으면 차단 없음(기능만 활성).
+//     예: ["hr.corp.local", "admin.corp.local"]
+const BLOCKED_HOSTS = [];
+// (2) 승인 게이트: update_plan으로 승인된 도메인 집합(세션). 승인 도메인 내 쓰기작업은 자동 실행,
+//     미승인 도메인은 승인 요청. ENFORCE_APPROVAL=false면 게이트 비활성(전부 허용).
+const ENFORCE_APPROVAL = true;
+const approvedDomains = new Set();
+
+function hostOfUrl(u) { try { return new URL(u).hostname; } catch { return null; } }
+function isBlockedHost(h) { return !!h && BLOCKED_HOSTS.some((b) => h === b || h.endsWith("." + b)); }
+function isApprovedHost(h) { return !!h && [...approvedDomains].some((d) => h === d || h.endsWith("." + d)); }
+async function getTabHost(tabId) { try { const t = await chrome.tabs.get(tabId); return hostOfUrl(t.url); } catch { return null; } }
+
+// 쓰기성 도구 게이트: 차단/미승인 시 거부 콘텐츠 반환, 통과 시 null.
+async function writeGate(tabId) {
+  const host = await getTabHost(tabId);
+  if (!host) return null; // about:blank 등 host 없음 → 통과(초기 상태)
+  if (isBlockedHost(host)) {
+    return { content: [{ type: "text", text: `차단됨: "${host}" 은(는) 사내 정책상 접근 불가 도메인입니다.` }] };
+  }
+  if (ENFORCE_APPROVAL && !isApprovedHost(host)) {
+    return { content: [{ type: "text", text: `도메인 "${host}" 미승인. 쓰기 작업 전에 update_plan(domains:["${host}"])으로 승인을 요청하세요. 승인 후에는 해당 도메인에서 자동 실행됩니다.` }] };
+  }
+  return null;
+}
+
 // --- Keep-alive alarm ---
 chrome.alarms.create("keepalive", { periodInMinutes: 0.4 });
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -423,6 +450,14 @@ const toolHandlers = {
       } catch {
         return { content: [{ type: "text", text: `Invalid URL: "${url}". Could not parse as a valid URL.` }] };
       }
+      // 사내 보안: 목표 도메인 블록리스트 + 승인 게이트
+      const targetHost = hostOfUrl(targetUrl);
+      if (isBlockedHost(targetHost)) {
+        return { content: [{ type: "text", text: `차단됨: "${targetHost}" 은(는) 사내 정책상 접근 불가 도메인입니다.` }] };
+      }
+      if (ENFORCE_APPROVAL && !isApprovedHost(targetHost)) {
+        return { content: [{ type: "text", text: `도메인 "${targetHost}" 미승인. update_plan(domains:["${targetHost}"])으로 먼저 승인하세요. 승인 후 해당 도메인은 자동 실행됩니다.` }] };
+      }
       await chrome.tabs.update(tabId, { url: targetUrl });
     }
 
@@ -455,6 +490,13 @@ const toolHandlers = {
   async computer(args) {
     const { action, tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
+
+    // 사내 보안: 쓰기성 액션(클릭/입력/키/드래그)만 승인 게이트 적용. 읽기(screenshot/zoom/wait/scroll/hover)는 자유.
+    const WRITE_ACTIONS = ["left_click", "right_click", "double_click", "triple_click", "type", "key", "left_click_drag"];
+    if (WRITE_ACTIONS.includes(action)) {
+      const gate = await writeGate(tabId);
+      if (gate) return gate;
+    }
 
     let coordinate = args.coordinate;
     // Resolve ref to coordinates if provided
@@ -716,6 +758,7 @@ const toolHandlers = {
   async form_input(args) {
     const { ref, value, tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
+    { const gate = await writeGate(tabId); if (gate) return gate; } // 사내 보안: 승인 게이트
 
     const resp = await sendContentMessage(tabId, { type: "setFormValue", ref, value });
     const result = resp?.result;
@@ -727,6 +770,7 @@ const toolHandlers = {
   async javascript_tool(args) {
     const { text, tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
+    { const gate = await writeGate(tabId); if (gate) return gate; } // 사내 보안: 승인 게이트(임의 JS는 그대로 활용하되 승인 도메인 한정)
 
     await ensureAttached(tabId);
     try {
@@ -893,11 +937,16 @@ const toolHandlers = {
 
   async update_plan(args) {
     const { domains, approach } = args;
+    // 사내 보안: 선언된 도메인을 세션 승인 목록에 등록 → 이후 해당 도메인 쓰기작업 자동 실행
+    for (const d of domains || []) {
+      const h = String(d).replace(/^https?:\/\//i, "").replace(/\/.*$/, "").toLowerCase().trim();
+      if (h) approvedDomains.add(h);
+    }
     let text = `Plan:\n\nDomains: ${domains.join(", ")}\n\nApproach:\n`;
     for (const step of approach) {
       text += `- ${step}\n`;
     }
-    text += "\nPlan auto-approved (no permission restrictions in this extension).";
+    text += `\n승인 완료. 이 세션에서 자동 실행되는 도메인: ${[...approvedDomains].join(", ") || "(없음)"}`;
     return { content: [{ type: "text", text }] };
   },
 };

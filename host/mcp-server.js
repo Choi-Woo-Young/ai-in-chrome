@@ -427,13 +427,46 @@ function mixedResult(parts) {
   return { content: parts };
 }
 
+// --- 사내 보안: 감사 로깅 (append-only JSONL, 사용자 홈 격리) ---
+const auditDir = path.join(os.homedir(), ".config", "open-claude-in-chrome", "logs");
+
+function summarizeArgs(tool, args) {
+  if (!args) return {};
+  const s = {};
+  if (args.tabId !== undefined) s.tabId = args.tabId;
+  if (args.url) s.url = String(args.url).slice(0, 200);
+  if (args.action) s.action = args.action;
+  if (args.coordinate) s.coordinate = args.coordinate;
+  if (args.ref) s.ref = args.ref;
+  if (args.query) s.query = String(args.query).slice(0, 120);
+  if (args.domains) s.domains = args.domains;
+  if (tool === "javascript_tool" && args.text) s.js = String(args.text).slice(0, 500);
+  if (tool === "form_input" && args.value !== undefined) s.value = String(args.value).slice(0, 120);
+  return s;
+}
+
+function writeAudit(entry) {
+  try {
+    fs.mkdirSync(auditDir, { recursive: true });
+    const day = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const line = JSON.stringify({ ts: new Date().toISOString(), mode, ...entry }) + "\n";
+    fs.appendFileSync(path.join(auditDir, `audit-${day}.jsonl`), line, { mode: 0o600 });
+  } catch { /* 감사 실패가 도구 실행을 막지 않도록 무시 */ }
+}
+
 async function callTool(toolName, args) {
+  const started = Date.now();
   try {
     const result = await sendToExtension(toolName, args);
+    const snip = typeof result === "string"
+      ? result.slice(0, 160)
+      : (result?.content?.find((c) => c.type === "text")?.text || "").slice(0, 160);
+    writeAudit({ tool: toolName, args: summarizeArgs(toolName, args), ok: true, result: snip, ms: Date.now() - started });
     if (typeof result === "string") return textResult(result);
     if (result && result.content) return result;
     return textResult(JSON.stringify(result, null, 2));
   } catch (err) {
+    writeAudit({ tool: toolName, args: summarizeArgs(toolName, args), ok: false, error: String(err.message), ms: Date.now() - started });
     return textResult(`Error: ${err.message}`);
   }
 }

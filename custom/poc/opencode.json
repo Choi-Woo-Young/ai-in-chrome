@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local stand-in)",
+      "options": { "baseURL": "http://localhost:11434/v1" },
+      "models": {
+        "qwen3-coder:30b": { "name": "Qwen3-Coder 30B (Qwen3.5-27B 대역, 다운로드중)" },
+        "gpt-oss:20b": { "name": "gpt-oss 20B (gpt-oss-12b 대역, 다운로드중)" },
+        "freehuntx/qwen3-coder:14b": { "name": "Qwen3-Coder 14B (현재 보유, 배선검증용)" },
+        "qwen3:8b": { "name": "Qwen3 8B (현재 보유, 배선검증용)" }
+      }
+    }
+  },
+  "mcp": {
+    "open-claude-in-chrome": {
+      "type": "local",
+      "command": [
+        "/opt/homebrew/bin/node",
+        "/Users/wooyoungchoi/StudioProject/niceProjects/ai-in-chrome/host/mcp-server.js"
+      ],
+      "enabled": true
+    }
+  }
+}
