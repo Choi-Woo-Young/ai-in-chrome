@@ -446,9 +446,13 @@ function connectEvents() {
 }
 
 // ---------- 전송 ----------
-async function refreshActiveTab() {
+// adopt=true면 현재 탭을 "메인 탭"으로 그룹에 편입(새 창 X, 공식 동작) 후 그 탭에서 작업하게 한다.
+// adopt=false(기본)는 읽기 전용 — 패널 로드 시 맥락 라벨 표시용.
+async function refreshActiveTab(opts) {
+  const adopt = opts && opts.adopt;
+  const type = adopt ? "sidepanel_adopt_active_tab" : "sidepanel_get_active_tab";
   try {
-    activeTab = await chrome.runtime.sendMessage({ type: "sidepanel_get_active_tab" });
+    activeTab = await chrome.runtime.sendMessage({ type });
   } catch { activeTab = null; }
   els.ctx.textContent = activeTab && activeTab.url
     ? `현재 페이지: ${activeTab.title || activeTab.url}`
@@ -465,7 +469,6 @@ async function send() {
   addUserMessage(text, imgsSnapshot);
   setWorking(true, "생각 중…");
 
-  await refreshActiveTab();
   const hasImages = imgsSnapshot.length > 0;
   // 이미지 없는 메시지인데 비전으로 자동전환된 상태면 → 이번 전송부터 기본 모델로 복귀(VLM 불필요)
   if (!hasImages && autoSwitchedFrom !== null) {
@@ -474,6 +477,9 @@ async function send() {
   }
   // 유효 모델이 도구(tool-calling)를 지원하는지 — 이미지+도구 동시 수행 가능 여부 결정
   const toolsOn = isToolModel(effectiveModel());
+  // 도구 작업이 가능한 경우, 사용자가 보는 현재 탭을 "메인 탭"으로 그룹에 편입(새 창 X)해 그 탭에서 작업.
+  // 도구 미지원(분석 전용) 모델이면 탭을 건드리지 않고 맥락만 읽는다.
+  await refreshActiveTab({ adopt: toolsOn });
   // 프롬프트 구성: 텍스트 턴 / 이미지 턴을 분리한다.
   //  - 텍스트 턴 + 도구 모델: "이 탭에서 작업" 프리픽스(브라우저 자동화가 목적).
   //  - 이미지 턴 + 도구 모델: 첨부 이미지를 주체로, 탭은 참고로, 도구는 선택으로. (요약/분석은 도구 없이 바로,

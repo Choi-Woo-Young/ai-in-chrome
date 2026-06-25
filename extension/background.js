@@ -9,6 +9,8 @@ self.addEventListener("unhandledrejection", (event) => {
 const NATIVE_HOST_NAME = "com.anthropic.open_claude_in_chrome";
 
 // --- State ---
+// 탭 그룹 제목: "Claude가 제어 중인 탭"임을 사용자에게 시각적으로 표시(공식 Claude in Chrome과 동일 개념).
+const GROUP_TITLE = "Claude";
 let nativePort = null;
 let tabGroupId = null;
 let tabGroupTabs = new Set();
@@ -120,9 +122,38 @@ async function ensureTabGroup(createIfEmpty) {
   const win = await chrome.windows.create({ focused: true, url: "about:blank" });
   const tab = win.tabs[0];
   const groupId = await chrome.tabs.group({ tabIds: [tab.id] });
-  await chrome.tabGroups.update(groupId, { title: "MCP", color: "blue" });
+  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: "blue" });
   tabGroupId = groupId;
   tabGroupTabs = new Set([tab.id]);
+}
+
+// 현재(사용자가 보던) 탭을 "메인 탭"으로 같은 창에서 그룹에 편입한다 — 새 창을 만들지 않는다.
+// 공식 Claude in Chrome처럼 사이드패널 발 작업을 현재 탭에서 in-place로 수행하기 위함.
+// (CLI/터미널 경로는 ensureTabGroup의 새-창 폴백을 그대로 사용.)
+async function adoptTabIntoGroup(tabId) {
+  const tab = await chrome.tabs.get(tabId);
+  // 추적 중인 그룹이 이 탭과 같은 창에 있으면 그 그룹에 탭을 추가
+  if (tabGroupId !== null) {
+    try {
+      const group = await chrome.tabGroups.get(tabGroupId);
+      if (group && group.windowId === tab.windowId) {
+        if (tab.groupId !== tabGroupId) {
+          await chrome.tabs.group({ tabIds: [tabId], groupId: tabGroupId });
+        }
+        tabGroupTabs.add(tabId);
+        return tabId;
+      }
+    } catch {
+      tabGroupId = null;
+      tabGroupTabs.clear();
+    }
+  }
+  // 그룹이 없거나 다른 창에 있으면 → 이 탭이 있는 현재 창에 새 그룹을 만든다(새 창 생성 안 함)
+  const groupId = await chrome.tabs.group({ tabIds: [tabId] });
+  await chrome.tabGroups.update(groupId, { title: GROUP_TITLE, color: "blue" });
+  tabGroupId = groupId;
+  tabGroupTabs = new Set([tabId]);
+  return tabId;
 }
 
 function formatTabContext(tabs) {
@@ -156,7 +187,7 @@ async function isInGroup(tabId) {
       if (tabGroupId === null) {
         try {
           const group = await chrome.tabGroups.get(tab.groupId);
-          if (group.title === "MCP") {
+          if (group.title === GROUP_TITLE) {
             tabGroupId = group.id;
             const groupTabs = await chrome.tabs.query({ groupId: tabGroupId });
             tabGroupTabs = new Set(groupTabs.map((t) => t.id));
@@ -974,7 +1005,7 @@ async function handleToolRequest(id, tool, args) {
 // Recover MCP tab group state after service worker restart
 async function recoverTabGroupState() {
   try {
-    const groups = await chrome.tabGroups.query({ title: "MCP" });
+    const groups = await chrome.tabGroups.query({ title: GROUP_TITLE });
     if (groups.length > 0) {
       tabGroupId = groups[0].id;
       const tabs = await chrome.tabs.query({ groupId: tabGroupId });
@@ -996,6 +1027,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
       const t = tabs && tabs[0];
       sendResponse(t ? { tabId: t.id, url: t.url || "", title: t.title || "" } : null);
+    }).catch(() => sendResponse(null));
+    return true; // async response
+  }
+  // 사이드패널이 작업을 시작할 때: 현재 탭을 "메인 탭"으로 그룹에 편입(새 창 X) 후 탭 정보 반환.
+  // → 모델이 이 tabId로 navigate/computer를 호출하면 isInGroup을 통과해 현재 탭에서 in-place 동작.
+  if (message && message.type === "sidepanel_adopt_active_tab") {
+    chrome.tabs.query({ active: true, lastFocusedWindow: true }).then(async (tabs) => {
+      const t = tabs && tabs[0];
+      if (!t) return sendResponse(null);
+      try { await adoptTabIntoGroup(t.id); } catch {}
+      sendResponse({ tabId: t.id, url: t.url || "", title: t.title || "" });
     }).catch(() => sendResponse(null));
     return true; // async response
   }
