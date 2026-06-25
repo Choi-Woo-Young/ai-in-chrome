@@ -38,6 +38,8 @@ body { display: flex; flex-direction: column; height: 100vh; }
 .msg.user { align-self: flex-end; background: var(--user); }
 .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
 .msg.error { align-self: flex-start; background: #3a2420; border: 1px solid var(--accent); color: #f0c5b6; }
+.msg-images { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.msg-images img { max-width: 140px; max-height: 140px; border-radius: 6px; display: block; }
 
 .activity { align-self: flex-start; max-width: 92%; font-size: 11px; color: var(--muted); }
 .activity .step {
@@ -70,6 +72,30 @@ button#send {
   background: var(--accent); color: white; font-size: 15px; cursor: pointer;
 }
 button#send:disabled { opacity: 0.5; cursor: default; }
+.attach-btn {
+  flex: none; width: 36px; height: 36px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--panel); color: var(--text);
+  font-size: 15px; cursor: pointer;
+}
+.attach-btn:hover { border-color: var(--accent); }
+
+/* 첨부 이미지 썸네일 */
+.thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+.thumb { position: relative; width: 48px; height: 48px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+.thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb .rm {
+  position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+  background: rgba(0,0,0,0.6); color: #fff; border: none; border-radius: 50%;
+  font-size: 11px; line-height: 16px; cursor: pointer; padding: 0;
+}
+/* 드롭 시 하이라이트 */
+body.dragover .composer { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 8px; }
+body.dragover::after {
+  content: "이미지를 여기에 놓으세요"; position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(217,119,87,0.12); color: var(--accent); font-size: 14px;
+  pointer-events: none; z-index: 50;
+}
 .hint { font-size: 10px; color: var(--muted); margin-top: 6px; }
 
 /* 묻지 않고 실행 모드 */

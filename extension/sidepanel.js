@@ -17,12 +17,20 @@ const els = {
   modeText: document.getElementById("modeText"),
   modeMenu: document.getElementById("modeMenu"),
   warn: document.getElementById("warn"),
+  thumbs: document.getElementById("thumbs"),
+  attachBtn: document.getElementById("attachBtn"),
+  fileInput: document.getElementById("fileInput"),
 };
 
 let cfg = { ...DEFAULTS };
 let selectedModel = ""; // "providerID/modelID" 또는 "" (opencode 기본값)
 let autoMode = false;   // "묻지 않고 실행"
 let sessionID = null;
+// 이미지 첨부 + 비전 모델 자동 전환
+const attachedImages = []; // { mime, dataUrl, name }
+let defaultModel = "";          // opencode.json top-level model
+const visionModels = new Set(); // attachment:true 모델("providerID/modelID")
+let autoSwitchedFrom = null;     // 이미지 때문에 자동 전환했다면 직전 선택값 보관
 let activeTab = null;
 const roleByMsg = {};      // messageID -> "user" | "assistant"
 const textNodeByPart = {}; // part.id -> DOM node (스트리밍 텍스트 갱신)
@@ -41,11 +49,27 @@ function clearEmpty() {
 }
 function scrollDown() { els.messages.scrollTop = els.messages.scrollHeight; }
 
-function addUserMessage(text) {
+function addUserMessage(text, images) {
   clearEmpty();
   const div = document.createElement("div");
   div.className = "msg user";
-  div.textContent = text;
+  if (text) {
+    const t = document.createElement("div");
+    t.className = "msg-text";
+    t.textContent = text;
+    div.appendChild(t);
+  }
+  if (images && images.length) {
+    const strip = document.createElement("div");
+    strip.className = "msg-images";
+    for (const img of images) {
+      const im = document.createElement("img");
+      im.src = img.dataUrl;
+      im.alt = img.name || "image";
+      strip.appendChild(im);
+    }
+    div.appendChild(strip);
+  }
   els.messages.appendChild(div);
   scrollDown();
 }
@@ -222,14 +246,19 @@ function modelParam() {
 // opencode 설정에서 사용 가능한 모델 목록을 받아 드롭다운 구성(환경 무관)
 async function fetchModels() {
   let list = [];
-  let defaultModel = "";
+  defaultModel = "";
+  visionModels.clear();
   try {
     const conf = await api("/config", { method: "GET" });
     defaultModel = (conf && conf.model) || "";
     const prov = (conf && conf.provider) || {};
     for (const pid of Object.keys(prov)) {
       const models = (prov[pid] && prov[pid].models) || {};
-      for (const mid of Object.keys(models)) list.push(pid + "/" + mid);
+      for (const mid of Object.keys(models)) {
+        const id = pid + "/" + mid;
+        list.push(id);
+        if (models[mid] && models[mid].attachment === true) visionModels.add(id);
+      }
     }
   } catch { /* 목록 못 받아도 '기본값'으로 동작 */ }
   const sel = els.modelSelect;
@@ -248,6 +277,86 @@ async function fetchModels() {
   else { sel.value = ""; selectedModel = ""; }
 }
 
+// ---------- 모델 선택 헬퍼 + 비전 자동 전환 ----------
+function setModelSelection(value) {
+  selectedModel = value || "";
+  els.modelSelect.value = selectedModel;
+  chrome.storage.local.set({ selectedModel });
+}
+function effectiveModel() { return selectedModel || defaultModel; }
+function isVisionModel(m) { return !!m && visionModels.has(m); }
+function firstVisionModel() { return visionModels.values().next().value || ""; }
+function maybeAutoSwitchVision() {
+  if (!attachedImages.length || isVisionModel(effectiveModel())) return;
+  const vm = firstVisionModel();
+  if (!vm) { showNote("비전(이미지) 지원 모델이 없어 이미지를 인식하지 못할 수 있습니다."); return; }
+  if (autoSwitchedFrom === null) autoSwitchedFrom = selectedModel; // 직전 선택 보관(""=기본값)
+  setModelSelection(vm);
+  showNote(`이미지 처리를 위해 ${vm} 로 전환했습니다.`);
+}
+function maybeRestoreModel() {
+  if (attachedImages.length || autoSwitchedFrom === null) return;
+  const prev = autoSwitchedFrom;
+  autoSwitchedFrom = null;
+  setModelSelection(prev); // 이미지 없으면 원래(기본) 모델로 복귀
+}
+function showNote(text) {
+  clearEmpty();
+  const div = document.createElement("div");
+  div.className = "activity";
+  const s = document.createElement("span");
+  s.className = "step";
+  s.textContent = "ℹ " + text;
+  div.appendChild(s);
+  els.messages.appendChild(div);
+  keepWorkingLast();
+  scrollDown();
+}
+
+// ---------- 이미지 첨부 ----------
+function readImageAsDataURL(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+async function addImages(files) {
+  const imgs = [...files].filter((f) => f.type && f.type.startsWith("image/"));
+  for (const f of imgs) {
+    try {
+      const dataUrl = await readImageAsDataURL(f);
+      attachedImages.push({ mime: f.type, dataUrl, name: f.name || "image" });
+    } catch {}
+  }
+  renderThumbs();
+  maybeAutoSwitchVision();
+}
+function removeImage(idx) {
+  attachedImages.splice(idx, 1);
+  renderThumbs();
+  maybeRestoreModel();
+}
+function renderThumbs() {
+  els.thumbs.innerHTML = "";
+  attachedImages.forEach((img, i) => {
+    const d = document.createElement("div");
+    d.className = "thumb";
+    const im = document.createElement("img");
+    im.src = img.dataUrl;
+    im.alt = img.name;
+    d.appendChild(im);
+    const rm = document.createElement("button");
+    rm.className = "rm";
+    rm.textContent = "×";
+    rm.title = "제거";
+    rm.addEventListener("click", () => removeImage(i));
+    d.appendChild(rm);
+    els.thumbs.appendChild(d);
+  });
+}
+
 function connectEvents() {
   const ev = new EventSource(cfg.opencodeUrl + "/event");
   ev.onopen = () => setStatus("연결됨", "ok");
@@ -258,11 +367,9 @@ function connectEvents() {
     const p = msg.properties || {};
     if (p.sessionID && sessionID && p.sessionID !== sessionID) return; // 내 세션만
 
-    // 세션 작업 상태 → 스피너 제어
+    // 세션 작업 상태 → busy일 때만 스피너 ON(끄기는 메시지 완료/에러에서만; 모델 로딩 등 비-busy 순간에 조기 종료 방지)
     if (msg.type === "session.status") {
-      const busy = p.status && p.status.type === "busy";
-      if (busy) setWorking(true);
-      else setWorking(false);
+      if (p.status && p.status.type === "busy") setWorking(true);
       return;
     }
     if (msg.type === "message.updated" && p.info) {
@@ -308,35 +415,42 @@ async function refreshActiveTab() {
 
 async function send() {
   const text = els.input.value.trim();
-  if (!text || !sessionID) return;
+  if ((!text && !attachedImages.length) || !sessionID) return;
+  const userText = text || "첨부한 이미지를 분석해줘.";
+  const imgsSnapshot = attachedImages.slice();
   els.input.value = "";
   els.input.style.height = "auto";
-  addUserMessage(text);
+  addUserMessage(text, imgsSnapshot);
   setWorking(true, "생각 중…");
 
   await refreshActiveTab();
   // 현재 탭 ID를 맥락으로 주입 → opencode가 올바른 tabId를 사용(환각 완화)
-  let prompt = text;
+  let prompt = userText;
   if (activeTab && activeTab.tabId != null) {
-    prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${text}`;
+    prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
   }
   lastSentText = prompt;
+
+  // 텍스트 + 첨부 이미지로 parts 구성
+  const parts = [{ type: "text", text: prompt }];
+  for (const img of attachedImages) {
+    parts.push({ type: "file", mime: img.mime, url: img.dataUrl, filename: img.name });
+  }
+  const body = JSON.stringify({ ...modelParam(), parts });
+  // 첨부 비우기(UI 즉시 정리). 모델 복귀는 전송 후.
+  attachedImages.length = 0;
+  renderThumbs();
 
   els.send.disabled = true;
   setStatus("작업 중…", "ok");
   try {
-    await api(`/session/${sessionID}/prompt_async`, {
-      method: "POST",
-      body: JSON.stringify({
-        ...modelParam(),
-        parts: [{ type: "text", text: prompt }],
-      }),
-    });
+    await api(`/session/${sessionID}/prompt_async`, { method: "POST", body });
   } catch (err) {
     addError(`전송 실패: ${err.message}`);
   } finally {
     els.send.disabled = false;
     setStatus("연결됨", "ok");
+    maybeRestoreModel(); // 이미지 없으면 기본 모델로 복귀
   }
 }
 
@@ -356,6 +470,30 @@ els.send.addEventListener("click", send);
 els.modelSelect.addEventListener("change", () => {
   selectedModel = els.modelSelect.value;
   chrome.storage.local.set({ selectedModel });
+  autoSwitchedFrom = null; // 사용자가 직접 모델을 바꾸면 자동 복귀 해제(수동 선택 존중)
+});
+
+// 이미지 첨부: 버튼 / 파일선택 / 붙여넣기 / 드래그앤드롭
+els.attachBtn.addEventListener("click", () => els.fileInput.click());
+els.fileInput.addEventListener("change", () => {
+  if (els.fileInput.files && els.fileInput.files.length) addImages(els.fileInput.files);
+  els.fileInput.value = "";
+});
+els.input.addEventListener("paste", (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  const files = [];
+  for (const it of items) {
+    if (it.kind === "file") { const f = it.getAsFile(); if (f) files.push(f); }
+  }
+  if (files.length) { e.preventDefault(); addImages(files); }
+});
+document.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragover"); });
+document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) document.body.classList.remove("dragover"); });
+document.addEventListener("drop", (e) => {
+  e.preventDefault();
+  document.body.classList.remove("dragover");
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addImages(e.dataTransfer.files);
 });
 
 // ---------- 실행 모드 (실행 전 확인 / 묻지 않고 실행) ----------
