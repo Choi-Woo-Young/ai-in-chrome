@@ -367,16 +367,24 @@ function connectEvents() {
     const p = msg.properties || {};
     if (p.sessionID && sessionID && p.sessionID !== sessionID) return; // 내 세션만
 
-    // 세션 작업 상태 → busy일 때만 스피너 ON(끄기는 메시지 완료/에러에서만; 모델 로딩 등 비-busy 순간에 조기 종료 방지)
+    // 세션 작업 상태 → busy면 스피너 ON, 아니면(턴 종료) OFF
     if (msg.type === "session.status") {
       if (p.status && p.status.type === "busy") setWorking(true);
+      else setWorking(false);
       return;
     }
     if (msg.type === "message.updated" && p.info) {
       roleByMsg[p.info.id] = p.info.role;
-      // 어시스턴트 메시지 완료 → 스피너 종료
-      if (p.info.role === "assistant" && p.info.time && p.info.time.completed) {
-        setWorking(false);
+      if (p.info.role === "assistant") {
+        // 에러 표시(이전엔 빈 화면처럼 보였음)
+        if (p.info.error && !p.info._errShown) {
+          p.info._errShown = true;
+          const em = (p.info.error.data && p.info.error.data.message) || p.info.error.name || "알 수 없는 오류";
+          addError(`오류: ${em}`);
+          setWorking(false);
+        }
+        // 메시지 완료 → 스피너 종료
+        if (p.info.time && p.info.time.completed) setWorking(false);
       }
       return;
     }
@@ -424,19 +432,28 @@ async function send() {
   setWorking(true, "생각 중…");
 
   await refreshActiveTab();
-  // 현재 탭 ID를 맥락으로 주입 → opencode가 올바른 tabId를 사용(환각 완화)
+  const hasImages = imgsSnapshot.length > 0;
+  // 이미지 없는 메시지인데 비전으로 자동전환된 상태면 → 이번 전송부터 기본 모델로 복귀(VLM 불필요)
+  if (!hasImages && autoSwitchedFrom !== null) {
+    setModelSelection(autoSwitchedFrom);
+    autoSwitchedFrom = null;
+  }
+  // 텍스트 모델: 탭 맥락 주입(브라우저 작업). 이미지 첨부(비전): 도구 미사용이라 액션 프리픽스 생략.
   let prompt = userText;
-  if (activeTab && activeTab.tabId != null) {
+  if (!hasImages && activeTab && activeTab.tabId != null) {
     prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
   }
   lastSentText = prompt;
 
   // 텍스트 + 첨부 이미지로 parts 구성
   const parts = [{ type: "text", text: prompt }];
-  for (const img of attachedImages) {
+  for (const img of imgsSnapshot) {
     parts.push({ type: "file", mime: img.mime, url: img.dataUrl, filename: img.name });
   }
-  const body = JSON.stringify({ ...modelParam(), parts });
+  // 이미지 첨부 시: 비전 모델은 tool-calling 미지원일 수 있어 도구 비활성화(분석 전용)
+  const reqBody = { ...modelParam(), parts };
+  if (hasImages) reqBody.tools = { "*": false };
+  const body = JSON.stringify(reqBody);
   // 첨부 비우기(UI 즉시 정리). 모델 복귀는 전송 후.
   attachedImages.length = 0;
   renderThumbs();
@@ -450,7 +467,8 @@ async function send() {
   } finally {
     els.send.disabled = false;
     setStatus("연결됨", "ok");
-    maybeRestoreModel(); // 이미지 없으면 기본 모델로 복귀
+    // 전송 직후엔 복귀하지 않음 → 이미지 처리에 쓴 VLM이 드롭다운에 그대로 보임.
+    // 기본 복귀는 다음에 '이미지 없는' 메시지를 보낼 때 수행(위 send 시작부) 또는 첨부를 모두 제거할 때.
   }
 }
 
