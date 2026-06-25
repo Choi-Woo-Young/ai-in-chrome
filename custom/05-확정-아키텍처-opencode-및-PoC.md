@@ -101,6 +101,8 @@ opencode는 오픈소스(MIT)·터미널 코딩 에이전트로, **커스텀 Ope
 
 **권장 = 하이브리드**: 기본 텍스트-퍼스트(비전 불필요), 시각이 꼭 필요한 작업만 VL 두뇌/묘사. PoC에서 "opencode가 이미지 tool-result를 모델에 실제로 전달하는지" 확인.
 
+> ✅ **구현·검증 완료 (맥 PoC)**: (ii)안을 **MCP 19번째 도구 `describe_screen(tabId, question)`** 로 구현(`host/mcp-server.js`). 스크린샷 캡처 → 비전 모델(`OCIC_VL_ENDPOINT`/`OCIC_VL_MODEL`, 기본 ollama `qwen2.5vl:7b`) → **텍스트 설명만** 두뇌에 반환(이미지는 두뇌를 안 거침 → 텍스트 전용 두뇌도 비전 활용). 읽기라 승인게이트 무관·감사 기록. AGENTS.md에 "read_page/find 우선, 시각 필요시에만 describe_screen" 규칙. 실증: qwen3 두뇌 + qwen2.5vl:7b가 example.com 화면을 정확히 읽음. **폐쇄망은 `OCIC_VL_ENDPOINT`를 vLLM VL 엔드포인트로 교체만** 하면 동일.
+
 ### 3.2 서빙 (vLLM)
 - gpt-oss / Qwen3.5-27B / VL을 각각 vLLM 인스턴스로(또는 멀티모델). H100 기준 **FP8** 권장. 툴콜 파서(`--enable-auto-tool-choice --tool-call-parser …`) 모델별 설정 + **반입 vLLM 버전에서 툴콜 정상 파싱 사전 검증.** (상세는 `01` 문서 §3 참고 — 게이트웨이 부분만 OpenAI 직결로 대체)
 

@@ -11,6 +11,11 @@
 - 클릭/입력은 **좌표 대신 `ref`를 사용**한다: `computer`의 `ref` 인자로 클릭, `form_input`의 `ref`로 값 설정.
 - 스크린샷은 **텍스트로 판단이 불가능할 때만** 최후수단으로 사용한다.
 
+## 하이브리드 비전 (describe_screen)
+- 너(두뇌)는 텍스트 모델이라 이미지를 직접 못 본다. **시각 정보가 꼭 필요하면** `describe_screen(tabId, question)` 도구를 호출하라 — 비전 모델이 화면을 텍스트로 설명해 준다.
+- **우선순위: read_page/find가 먼저.** 접근성 트리로 안 보이는 화면(캔버스, 이미지 위주 UI, 차트, 비표준 위젯)에서만 describe_screen을 쓴다. 일반 페이지에 남용하지 말 것.
+- describe_screen은 읽기 작업이라 승인 게이트와 무관하게 동작한다.
+
 ## 작업 절차
 1. `tabs_context_mcp` → 탭 확보
 2. `navigate`로 목표 URL 이동

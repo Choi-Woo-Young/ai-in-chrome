@@ -454,6 +454,34 @@ function writeAudit(entry) {
   } catch { /* 감사 실패가 도구 실행을 막지 않도록 무시 */ }
 }
 
+// --- 하이브리드 비전: 텍스트 두뇌가 필요할 때만 호출하는 화면 묘사 (PoC: ollama, 폐쇄망: vLLM로 교체) ---
+const VL_ENDPOINT = process.env.OCIC_VL_ENDPOINT || "http://localhost:11434/api/chat";
+const VL_MODEL = process.env.OCIC_VL_MODEL || "qwen2.5vl:7b";
+
+async function describeScreen(tabId, question) {
+  // 1) 확장에서 스크린샷 캡처(읽기 액션 → 승인 게이트 비대상)
+  const shot = await sendToExtension("computer", { action: "screenshot", tabId });
+  const imgPart = shot?.content?.find((c) => c.type === "image");
+  if (!imgPart || !imgPart.data) throw new Error("스크린샷 캡처 실패");
+  // 2) 비전 모델에 이미지+질문 전송 (이미지는 두뇌를 거치지 않고 여기서 텍스트로 변환)
+  const resp = await fetch(VL_ENDPOINT, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: VL_MODEL,
+      messages: [{
+        role: "user",
+        content: question || "이 화면에 무엇이 보이는지, 클릭 가능한 요소와 대략적 위치를 한국어로 간결히 설명해줘.",
+        images: [imgPart.data],
+      }],
+      stream: false,
+    }),
+  });
+  if (!resp.ok) throw new Error(`비전 모델 호출 실패: HTTP ${resp.status}`);
+  const data = await resp.json();
+  return (data && data.message && data.message.content) || "(비전 모델 응답 없음)";
+}
+
 async function callTool(toolName, args) {
   const started = Date.now();
   try {
@@ -724,6 +752,27 @@ server.tool(
     filename: z.string().optional().describe('Optional filename for the uploaded file (default: "image.png")'),
   },
   async (args) => callTool("upload_image", args)
+);
+
+// 19. describe_screen (사내 하이브리드 비전 — 텍스트 두뇌가 필요할 때만 호출)
+server.tool(
+  "describe_screen",
+  "현재 탭의 화면을 비전 모델로 분석해 텍스트 설명을 받는다. read_page/find로 접근성 트리에서 정보를 얻기 어려운 시각적 화면(캔버스, 이미지 위주 UI, 차트, 비표준 위젯)에서만 사용하라. 스크린샷 이미지를 직접 보지 않고 텍스트 설명만 받으므로 텍스트 전용 모델도 사용할 수 있다. 일반적인 페이지는 read_page/find를 우선 사용할 것.",
+  {
+    tabId: z.number().describe("분석할 탭 ID. 현재 MCP 그룹의 탭이어야 한다."),
+    question: z.string().optional().describe("화면에 대해 알고 싶은 것(예: '로그인 버튼이 어디 있나', '차트가 무엇을 보여주나'). 생략하면 화면 전체를 설명한다."),
+  },
+  async (args) => {
+    const started = Date.now();
+    try {
+      const desc = await describeScreen(args.tabId, args.question);
+      writeAudit({ tool: "describe_screen", args: { tabId: args.tabId, question: args.question, vlModel: VL_MODEL }, ok: true, result: desc.slice(0, 160), ms: Date.now() - started });
+      return textResult(desc);
+    } catch (err) {
+      writeAudit({ tool: "describe_screen", args: { tabId: args.tabId }, ok: false, error: String(err.message), ms: Date.now() - started });
+      return textResult(`Error: ${err.message}`);
+    }
+  }
 );
 
 // --- Start MCP server ---

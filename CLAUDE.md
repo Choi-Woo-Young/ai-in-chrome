@@ -56,6 +56,8 @@ Three security patches are **already merged and active** — they intentionally 
 
 `javascript_tool` is deliberately **not** restricted (full arbitrary JS retained) beyond the approval gate + audit. Local TCP auth was intentionally skipped (target is 1-user-per-VDI).
 
+A **19th tool — `describe_screen(tabId, question)`** (mcp-server.js) — is added for the hybrid-vision pattern: the text "brain" model (Qwen3) stays in charge and calls this only when the accessibility tree (`read_page`/`find`) is insufficient. The MCP server captures a screenshot, sends it to a vision model (`OCIC_VL_ENDPOINT`/`OCIC_VL_MODEL`, default ollama `qwen2.5vl:7b`; point at vLLM in the closed network), and returns **text only** — so the image never enters the brain's context and any text model can use it. It's read-only (not approval-gated) but is audited. PoC validated on Mac (M4 Pro 48GB) with opencode as the agent.
+
 ## Setup / Development Workflow
 
 ```bash
