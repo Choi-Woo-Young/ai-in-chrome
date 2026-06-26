@@ -1,4 +1,4 @@
-# Open Claude in Chrome — Integration Test Prompt
+# Byside — Integration Test Prompt
 
 Copy and paste everything below the line into a new Claude Code session that has the `open-claude-in-chrome` MCP configured.
 

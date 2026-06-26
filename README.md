@@ -1,14 +1,16 @@
 <p align="center">
-  <img src="extension/icons/icon128.png" width="96" alt="Open Claude in Chrome">
+  <img src="extension/icons/icon128.png" width="96" alt="Byside">
 </p>
 
-<h1 align="center">Open Claude in Chrome</h1>
+<h1 align="center">Byside</h1>
 
 <p align="center">
-  <em>Official Claude in Chrome gives you 58 blocked domains and two browsers.<br/>
-  <strong>Open Claude in Chrome gives you the whole web.</strong></em>
+  <sub>(formerly Open Claude in Chrome)</sub>
   <br/>
-  <sub>Clean-room reimplementation of Anthropic's browser extension. No blocklist. Any Chromium browser. 100% feature &amp; performance parity.</sub>
+  <em>브라우저 옆자리에 앉은 AI 일손.<br/>
+  <strong>Always by your side — just ask, and it gets the web task done.</strong></em>
+  <br/>
+  <sub>An AI assistant that lives in your browser's side panel. Built on the Claude in Chrome MCP toolset. Works on any Chromium browser.</sub>
   <br/>
   <sub>by <a href="https://noemica.io">noemica</a></sub>
 </p>
@@ -28,16 +30,16 @@
     <img src="https://img.youtube.com/vi/n4-2fjOsGhw/maxresdefault.jpg" alt="Demo — Claude on Tinder, Reddit, and Robinhood" width="820"/>
   </a>
   <br/>
-  <sub><em>Watch Claude navigate Tinder, Reddit, and Robinhood — sites the official extension can't reach.</em></sub>
+  <sub><em>Watch Byside handle real browser tasks, right in the tab you're already on.</em></sub>
 </p>
 
 ---
 
-The official [Claude in Chrome](https://code.claude.com/docs/en/chrome) extension gives Claude Code full browser automation — as long as you stay within Anthropic's allowlist of "safe" sites. Open Claude in Chrome is a clean-room reimplementation that strips the restrictions while keeping all 18 MCP tools and matching the official extension's performance.
+Byside is an AI assistant that lives in your browser's side panel. Tell it what you need in plain language and it clicks, types, and finishes web tasks for you — right in the tab you're already looking at. It's built on the same 18 MCP tools as the official [Claude in Chrome](https://code.claude.com/docs/en/chrome) and works on any Chromium browser.
 
 ## What's Different
 
-| | Claude in Chrome | Open Claude in Chrome |
+| | Claude in Chrome | Byside |
 |---|---|---|
 | **Domain blocklist** | 58 blocked domains across 11 categories | No blocklist. Navigate anywhere. |
 | **Browser support** | Chrome and Edge only | Any Chromium browser (Chrome, Edge, Brave, Arc, Opera, Vivaldi, etc.) |
@@ -60,8 +62,6 @@ The official [Claude in Chrome](https://code.claude.com/docs/en/chrome) extensio
 | Adult | Pornhub, XVideos, XNXX |
 | News/Media | NYT, WSJ, Barron's, MarketWatch, Bloomberg, Reuters, Economist, Wired, Vogue |
 | Social Media | Reddit |
-
-Open Claude in Chrome has **none of these restrictions**.
 
 ## Architecture
 

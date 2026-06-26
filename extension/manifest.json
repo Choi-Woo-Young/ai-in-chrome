@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Open Claude in Chrome",
+  "name": "Byside",
   "version": "1.0.0",
-  "description": "Claude in Chrome, open source. No domain blocklist. Any Chromium browser.",
+  "description": "브라우저 옆자리의 AI 일손 — 사이드패널에 말하면 웹 작업을 대신 처리합니다.",
   "minimum_chrome_version": "116",
   "permissions": [
     "tabs",
@@ -14,13 +14,14 @@
     "windows",
     "storage",
     "alarms",
-    "sidePanel"
+    "sidePanel",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
   "action": {
-    "default_title": "Open Claude in Chrome"
+    "default_title": "Byside"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
@@ -33,7 +34,8 @@
       "matches": ["<all_urls>"],
       "js": ["content.js"],
       "run_at": "document_idle",
-      "all_frames": false
+      "all_frames": true,
+      "match_about_blank": true
     }
   ],
   "icons": {

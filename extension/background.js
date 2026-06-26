@@ -1,4 +1,4 @@
-// Background service worker for Open Claude in Chrome extension.
+// Background service worker for Byside extension.
 // Handles: native messaging, CDP via chrome.debugger, tool dispatch, tab group management.
 
 // Prevent unhandled rejections from killing the service worker
@@ -346,24 +346,45 @@ function parseModifierString(modStr) {
 }
 
 // --- Content script communication ---
-async function sendContentMessage(tabId, message) {
+// all_frames:true로 모든 프레임에 content.js가 있으므로 frameId를 명시해 한 프레임에만 보낸다(기본 top=0).
+async function sendContentMessage(tabId, message, frameId = 0) {
+  const opts = { frameId };
   try {
-    const response = await chrome.tabs.sendMessage(tabId, message);
-    return response;
+    return await chrome.tabs.sendMessage(tabId, message, opts);
   } catch {
-    // Content script might not be injected yet, try injecting
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"],
-    });
-    // Retry
-    return chrome.tabs.sendMessage(tabId, message);
+    // 아직 주입 안 됐을 수 있음 → 해당 프레임에 주입 후 재시도
+    try {
+      await chrome.scripting.executeScript({ target: { tabId, frameIds: [frameId] }, files: ["content.js"] });
+    } catch {}
+    return chrome.tabs.sendMessage(tabId, message, opts);
   }
 }
 
-// --- Resolve ref to coordinates ---
+// 탭의 콘텐츠 프레임 목록(top 먼저). iframe 지원: read_page/find를 프레임별로 모은다.
+async function listContentFrames(tabId) {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    if (!frames || !frames.length) return [{ frameId: 0, url: "" }];
+    // top(0) 먼저, 나머지는 frameId 순. 에러/빈 프레임은 호출부에서 try/catch로 흡수.
+    return frames
+      .filter((f) => f.url !== "about:srcdoc" || true) // srcdoc 포함(match_about_blank로 주입됨)
+      .sort((a, b) => a.frameId - b.frameId);
+  } catch {
+    return [{ frameId: 0, url: "" }];
+  }
+}
+
+// ref의 프레임 접두사 파싱: "f<frameId>_ref_N" → {frameId, localRef}; 없으면 top(0).
+function parseFrameRef(ref) {
+  const m = /^f(\d+)_(ref_\d+)$/.exec(ref || "");
+  return m ? { frameId: Number(m[1]), localRef: m[2] } : { frameId: 0, localRef: ref };
+}
+function shortUrl(u) { try { const x = new URL(u); return x.host + x.pathname.slice(0, 40); } catch { return u || "frame"; } }
+
+// --- Resolve ref to coordinates (프레임 라우팅) ---
 async function resolveRefToCoordinates(tabId, ref) {
-  const resp = await sendContentMessage(tabId, { type: "getRefCoordinates", ref });
+  const { frameId, localRef } = parseFrameRef(ref);
+  const resp = await sendContentMessage(tabId, { type: "getRefCoordinates", ref: localRef }, frameId);
   if (resp?.result) return [resp.result.x, resp.result.y];
   return null;
 }
@@ -658,10 +679,8 @@ const toolHandlers = {
       case "scroll_to": {
         if (!coordinate && !args.ref) return { content: [{ type: "text", text: "coordinate or ref is required for scroll_to" }] };
         if (args.ref) {
-          await sendContentMessage(tabId, {
-            type: "scrollToRef",
-            ref: args.ref,
-          });
+          const pr = parseFrameRef(args.ref);
+          await sendContentMessage(tabId, { type: "scrollToRef", ref: pr.localRef }, pr.frameId);
         }
         // Scroll target element into view via JS
         if (coordinate) {
@@ -725,17 +744,24 @@ const toolHandlers = {
     const { tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
 
-    const resp = await sendContentMessage(tabId, {
-      type: "generateAccessibilityTree",
-      options: {
-        filter: args.filter,
-        depth: args.depth,
-        max_chars: args.max_chars,
-        ref_id: args.ref_id,
-      },
-    });
-
-    let tree = resp?.result || "Error: Could not generate accessibility tree";
+    const options = { filter: args.filter, depth: args.depth, max_chars: args.max_chars, ref_id: args.ref_id };
+    const frames = await listContentFrames(tabId);
+    const blocks = [];
+    for (const fr of frames) {
+      let resp;
+      try { resp = await sendContentMessage(tabId, { type: "generateAccessibilityTree", options }, fr.frameId); }
+      catch { continue; }
+      const t = resp && resp.result;
+      if (!t || typeof t !== "string" || !t.trim()) continue;
+      if (fr.frameId === 0) {
+        blocks.push(t);
+      } else {
+        // 자식 프레임(예: 에디터 iframe): ref에 프레임 접두사를 붙여 클릭/입력 시 라우팅되게 한다.
+        const prefixed = t.replace(/\bref_(\d+)\b/g, `f${fr.frameId}_ref_$1`);
+        blocks.push(`\n[iframe ${fr.frameId}: ${shortUrl(fr.url)}]\n${prefixed}`);
+      }
+    }
+    let tree = blocks.join("\n") || "Error: Could not generate accessibility tree";
     // Append viewport dimensions so Claude knows the coordinate space
     try {
       await ensureAttached(tabId);
@@ -773,16 +799,28 @@ const toolHandlers = {
     const { query, tabId } = args;
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
 
-    const resp = await sendContentMessage(tabId, { type: "findElements", query });
-    const results = resp?.result || [];
+    const frames = await listContentFrames(tabId);
+    const all = [];
+    for (const fr of frames) {
+      if (all.length >= 20) break;
+      let resp;
+      try { resp = await sendContentMessage(tabId, { type: "findElements", query }, fr.frameId); }
+      catch { continue; }
+      for (const r of (resp && resp.result) || []) {
+        if (all.length >= 20) break;
+        const ref = fr.frameId === 0 ? r.ref : `f${fr.frameId}_${r.ref}`; // 자식 프레임 ref 접두사
+        all.push({ ...r, ref, frameId: fr.frameId });
+      }
+    }
 
-    if (results.length === 0) {
+    if (all.length === 0) {
       return { content: [{ type: "text", text: `No elements found matching "${query}"` }] };
     }
 
-    let text = `Found ${results.length} element(s) matching "${query}":\n\n`;
-    for (const r of results) {
-      text += `[${r.ref}] ${r.role} "${r.name}" at (${r.coordinates[0]}, ${r.coordinates[1]})\n`;
+    let text = `Found ${all.length} element(s) matching "${query}":\n\n`;
+    for (const r of all) {
+      const where = r.frameId ? ` [iframe ${r.frameId}]` : "";
+      text += `[${r.ref}] ${r.role} "${r.name}" at (${r.coordinates[0]}, ${r.coordinates[1]})${where}\n`;
     }
 
     return { content: [{ type: "text", text }] };
@@ -793,7 +831,8 @@ const toolHandlers = {
     if (!(await isInGroup(tabId))) return { content: [{ type: "text", text: `Tab ${tabId} is not in the MCP group.` }] };
     { const gate = await writeGate(tabId); if (gate) return gate; } // 사내 보안: 승인 게이트
 
-    const resp = await sendContentMessage(tabId, { type: "setFormValue", ref, value });
+    const { frameId, localRef } = parseFrameRef(ref);
+    const resp = await sendContentMessage(tabId, { type: "setFormValue", ref: localRef, value }, frameId);
     const result = resp?.result;
 
     if (result?.error) return { content: [{ type: "text", text: `Error: ${result.error}` }] };

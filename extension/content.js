@@ -1,4 +1,4 @@
-// Content script for Open Claude in Chrome extension.
+// Content script for Byside extension.
 // Injected into every page. Provides:
 // - Accessibility tree generation (read_page)
 // - Element ref mapping with WeakRef (persistent across calls)
@@ -299,6 +299,7 @@
     }
 
     const all = collectAll(document);
+    const off = frameOffset(); // 이 프레임의 top-level 오프셋(한 번 계산)
 
     for (const el of all) {
       if (results.length >= 20) break;
@@ -324,7 +325,7 @@
           ref,
           role: role || tag,
           name: name || text.substring(0, 80),
-          coordinates: [Math.round(rect.x + rect.width / 2), Math.round(rect.y + rect.height / 2)],
+          coordinates: [Math.round(rect.x + rect.width / 2 + off.x), Math.round(rect.y + rect.height / 2 + off.y)],
         });
       }
     }
@@ -404,14 +405,36 @@
     return { success: true, value: target.value };
   }
 
-  // --- Get element coordinates for ref ---
+  // --- Frame offset for top-level coordinates ---
+  // When this script runs inside an iframe, compute the cumulative offset of this frame
+  // within the TOP document by walking up the same-origin frame chain (frameElement).
+  // Input.dispatchMouseEvent uses top-level coords, so all element coords add this offset.
+  // Cross-origin frames break the chain (frameElement is null) → best-effort (offset so far).
+  function frameOffset() {
+    let ox = 0, oy = 0, win = window;
+    try {
+      while (win !== win.top) {
+        const fe = win.frameElement; // same-origin only
+        if (!fe) break;
+        const fr = fe.getBoundingClientRect();
+        const cs = fe.ownerDocument.defaultView.getComputedStyle(fe);
+        ox += fr.x + (parseFloat(cs.borderLeftWidth) || 0) + (parseFloat(cs.paddingLeft) || 0);
+        oy += fr.y + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.paddingTop) || 0);
+        win = win.parent;
+      }
+    } catch { /* cross-origin boundary */ }
+    return { x: ox, y: oy };
+  }
+
+  // --- Get element coordinates for ref (top-level viewport coords) ---
   function getRefCoordinates(refId) {
     const el = resolveRef(refId);
     if (!el) return null;
     const rect = el.getBoundingClientRect();
+    const o = frameOffset();
     return {
-      x: Math.round(rect.x + rect.width / 2),
-      y: Math.round(rect.y + rect.height / 2),
+      x: Math.round(rect.x + rect.width / 2 + o.x),
+      y: Math.round(rect.y + rect.height / 2 + o.y),
     };
   }
 

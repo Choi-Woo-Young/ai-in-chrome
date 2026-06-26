@@ -26,8 +26,10 @@ let cfg = { ...DEFAULTS };
 let selectedModel = ""; // "providerID/modelID" 또는 "" (opencode 기본값)
 let autoMode = false;   // "묻지 않고 실행"
 let sessionID = null;
-// 이미지 첨부 + 비전 모델 자동 전환
-const attachedImages = []; // { mime, dataUrl, name }
+// 첨부 + 비전 모델 자동 전환
+// 항목: 이미지 { kind:"image", mime, name, dataUrl } 또는
+//       문서   { kind:"doc", name, mime, text?, status:"extracting"|"ready"|"error", error?, note? }
+const attachedItems = [];
 let defaultModel = "";          // opencode.json top-level model
 const visionModels = new Set(); // 이미지 입력 가능 모델("providerID/modelID")
 const toolModels = new Set();   // tool-calling 가능 모델
@@ -38,6 +40,14 @@ const textNodeByPart = {}; // part.id -> DOM node (스트리밍 텍스트 갱신
 const stepByPart = {};     // part.id -> DOM node (도구 활동)
 const bubbleByMsg = {};    // messageID -> assistant 말풍선
 let lastSentText = "";
+
+// opencode 내장 코딩/파일 도구를 끈다 — 이 사이드패널은 "브라우저 에이전트"이므로
+// 반드시 MCP 브라우저 도구(open-claude-in-chrome_*)만 써야 한다. (이 목록에 없는 도구=MCP는 그대로 활성)
+// 끄지 않으면 "테스트 페이지에 등록" 같은 요청을 glob/read로 파일 찾기처럼 오해한다.
+const BUILTIN_TOOLS_OFF = {
+  bash: false, edit: false, write: false, read: false, grep: false, glob: false,
+  list: false, patch: false, webfetch: false, task: false, todowrite: false, todoread: false,
+};
 
 // ---------- 유틸 ----------
 function setStatus(text, cls) {
@@ -50,7 +60,7 @@ function clearEmpty() {
 }
 function scrollDown() { els.messages.scrollTop = els.messages.scrollHeight; }
 
-function addUserMessage(text, images) {
+function addUserMessage(text, items) {
   clearEmpty();
   const div = document.createElement("div");
   div.className = "msg user";
@@ -60,14 +70,29 @@ function addUserMessage(text, images) {
     t.textContent = text;
     div.appendChild(t);
   }
-  if (images && images.length) {
+  const imgs = (items || []).filter((i) => i.kind === "image");
+  const docs = (items || []).filter((i) => i.kind === "doc");
+  if (imgs.length) {
     const strip = document.createElement("div");
     strip.className = "msg-images";
-    for (const img of images) {
+    for (const img of imgs) {
       const im = document.createElement("img");
       im.src = img.dataUrl;
       im.alt = img.name || "image";
       strip.appendChild(im);
+    }
+    div.appendChild(strip);
+  }
+  if (docs.length) {
+    const strip = document.createElement("div");
+    strip.className = "msg-files";
+    for (const doc of docs) {
+      const chip = document.createElement("span");
+      chip.className = "msg-file";
+      const ic = document.createElement("span"); ic.textContent = docIcon(doc.name);
+      const nm = document.createElement("span"); nm.className = "doc-name"; nm.textContent = doc.name; nm.title = doc.name;
+      chip.appendChild(ic); chip.appendChild(nm);
+      strip.appendChild(chip);
     }
     div.appendChild(strip);
   }
@@ -165,6 +190,7 @@ async function approveAndContinue(host, btn) {
       method: "POST",
       body: JSON.stringify({
         ...modelParam(),
+        tools: { ...BUILTIN_TOOLS_OFF },
         parts: [{ type: "text", text: `${host} 도메인을 방금 승인했어. 막혔던 작업을 같은 탭에서 다시 진행해줘.` }],
       }),
     });
@@ -189,6 +215,7 @@ let workingSince = 0;
 let workingTimer = null;
 let statusPollTimer = null;   // SSE 종료 이벤트 유실 대비 백스톱 폴링
 let sawAssistantPart = false; // 이번 턴에 assistant 파트(텍스트/도구)가 렌더됐는지
+let mapReduceActive = false;  // 분할 반복 중에는 메인 세션이 idle이라 백스톱 폴링을 멈춘다
 function setWorking(on, label) {
   if (on) {
     clearEmpty();
@@ -216,6 +243,7 @@ function setWorking(on, label) {
 // 서버의 권위 상태로 스피너를 보정. /session/status 맵에는 idle이 아닌 세션만 존재(없으면 idle).
 async function pollSessionStatus() {
   if (!workingEl || !sessionID) return;
+  if (mapReduceActive) return; // 분할 반복 중: 작업은 임시 세션에서 진행되므로 메인 세션 idle로 끄지 않음
   let map;
   try { map = await api("/session/status"); } catch { return; } // 일시 장애: 다음 틱에 재시도
   const st = map && map[sessionID];
@@ -318,8 +346,10 @@ function firstVisionModel() {
   for (const m of visionModels) if (toolModels.has(m)) return m; // vision+tools 우선
   return visionModels.values().next().value || "";              // 없으면 vision-only
 }
+function hasImageItems() { return attachedItems.some((i) => i.kind === "image"); }
 function maybeAutoSwitchVision() {
-  if (!attachedImages.length || isVisionModel(effectiveModel())) return;
+  // 이미지(스캔 PDF 페이지 포함)만 비전 모델이 필요. 텍스트 문서는 전환 불필요.
+  if (!hasImageItems() || isVisionModel(effectiveModel())) return;
   const vm = firstVisionModel();
   if (!vm) { showNote("비전(이미지) 지원 모델이 없어 이미지를 인식하지 못할 수 있습니다."); return; }
   if (autoSwitchedFrom === null) autoSwitchedFrom = selectedModel; // 직전 선택 보관(""=기본값)
@@ -327,7 +357,7 @@ function maybeAutoSwitchVision() {
   showNote(`이미지 처리를 위해 ${vm} 로 전환했습니다.`);
 }
 function maybeRestoreModel() {
-  if (attachedImages.length || autoSwitchedFrom === null) return;
+  if (hasImageItems() || autoSwitchedFrom === null) return;
   const prev = autoSwitchedFrom;
   autoSwitchedFrom = null;
   setModelSelection(prev); // 이미지 없으면 원래(기본) 모델로 복귀
@@ -345,7 +375,7 @@ function showNote(text) {
   scrollDown();
 }
 
-// ---------- 이미지 첨부 ----------
+// ---------- 첨부 (이미지 + 문서) ----------
 function readImageAsDataURL(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -354,36 +384,85 @@ function readImageAsDataURL(file) {
     r.readAsDataURL(file);
   });
 }
-async function addImages(files) {
-  const imgs = [...files].filter((f) => f.type && f.type.startsWith("image/"));
-  for (const f of imgs) {
+function isImageFile(f) { return f.type && f.type.startsWith("image/"); }
+function docIcon(name) {
+  const ext = (/\.([^.]+)$/.exec(name || "") || [])[1] || "";
+  if (ext === "pdf") return "📕";
+  if (ext === "docx" || ext === "doc") return "📄";
+  if (ext === "pptx" || ext === "ppt") return "📊";
+  if (ext === "xlsx" || ext === "xls" || ext === "csv") return "📈";
+  if (ext === "hwpx" || ext === "hwp") return "📑";
+  return "📃";
+}
+
+async function addFiles(files) {
+  for (const f of [...files]) {
+    if (isImageFile(f)) {
+      try {
+        const dataUrl = await readImageAsDataURL(f);
+        attachedItems.push({ kind: "image", mime: f.type, dataUrl, name: f.name || "image" });
+      } catch {}
+      renderThumbs();
+      continue;
+    }
+    // 문서: 자리표시자 추가 → 추출 → 채움
+    const item = { kind: "doc", name: f.name || "document", mime: f.type || "", status: "extracting" };
+    attachedItems.push(item);
+    renderThumbs();
     try {
-      const dataUrl = await readImageAsDataURL(f);
-      attachedImages.push({ mime: f.type, dataUrl, name: f.name || "image" });
-    } catch {}
+      const res = await window.DocExtract.extractDocument(f);
+      if (res.kind === "image-pages") {
+        // 스캔/이미지 PDF → 페이지 이미지를 개별 이미지 항목으로 편입(비전 OCR 경로)
+        const idx = attachedItems.indexOf(item);
+        if (idx >= 0) attachedItems.splice(idx, 1);
+        (res.images || []).forEach((im) =>
+          attachedItems.push({ kind: "image", mime: im.mime, dataUrl: im.dataUrl, name: im.name }));
+        if (res.truncated) showNote(`${item.name}: 페이지가 많아 앞부분만 이미지로 변환했습니다.`);
+      } else {
+        const text = (res.text || "").trim();
+        if (!text) { item.status = "error"; item.error = "텍스트를 추출하지 못했습니다(빈 문서/스캔본일 수 있음)."; }
+        else { item.status = "ready"; item.text = text; item.note = `${text.length.toLocaleString()}자`; }
+      }
+    } catch (e) {
+      item.status = "error";
+      item.error = (e && e.message) || "추출 실패";
+    }
+    renderThumbs();
   }
-  renderThumbs();
   maybeAutoSwitchVision();
 }
-function removeImage(idx) {
-  attachedImages.splice(idx, 1);
+function removeItem(idx) {
+  attachedItems.splice(idx, 1);
   renderThumbs();
   maybeRestoreModel();
 }
 function renderThumbs() {
   els.thumbs.innerHTML = "";
-  attachedImages.forEach((img, i) => {
+  attachedItems.forEach((it, i) => {
     const d = document.createElement("div");
-    d.className = "thumb";
-    const im = document.createElement("img");
-    im.src = img.dataUrl;
-    im.alt = img.name;
-    d.appendChild(im);
+    if (it.kind === "image") {
+      d.className = "thumb";
+      const im = document.createElement("img");
+      im.src = it.dataUrl; im.alt = it.name;
+      d.appendChild(im);
+    } else {
+      d.className = "thumb doc" + (it.status === "error" ? " error" : "") + (it.status === "extracting" ? " working" : "");
+      const ic = document.createElement("span");
+      ic.className = "doc-icon"; ic.textContent = docIcon(it.name);
+      d.appendChild(ic);
+      const meta = document.createElement("div");
+      meta.className = "doc-meta";
+      const nm = document.createElement("div");
+      nm.className = "doc-name"; nm.textContent = it.name; nm.title = it.name;
+      const sub = document.createElement("div");
+      sub.className = "doc-sub";
+      sub.textContent = it.status === "extracting" ? "추출 중…" : it.status === "error" ? (it.error || "실패") : (it.note || "");
+      meta.appendChild(nm); meta.appendChild(sub);
+      d.appendChild(meta);
+    }
     const rm = document.createElement("button");
-    rm.className = "rm";
-    rm.textContent = "×";
-    rm.title = "제거";
-    rm.addEventListener("click", () => removeImage(i));
+    rm.className = "rm"; rm.textContent = "×"; rm.title = "제거";
+    rm.addEventListener("click", () => removeItem(i));
     d.appendChild(rm);
     els.thumbs.appendChild(d);
   });
@@ -459,67 +538,231 @@ async function refreshActiveTab(opts) {
     : "현재 페이지 정보 없음";
 }
 
+// ---------- 대용량 문서: 분할 반복(map-reduce) ----------
+const SINGLE_PASS_CHARS = 24000; // 추출 텍스트가 이 길이 이하면 한 번에 주입
+const CHUNK_CHARS = 18000;       // map 단계 청크 크기
+const PAGES_PER_BATCH = 2;       // 스캔 PDF 이미지 묶음당 페이지 수
+
+function modelParamFor(modelId) {
+  if (!modelId) return {};
+  const i = modelId.indexOf("/");
+  if (i < 0) return {};
+  return { model: { providerID: modelId.slice(0, i), modelID: modelId.slice(i + 1) } };
+}
+function partsText(parts) {
+  return (parts || []).filter((p) => p && p.type === "text" && p.text).map((p) => p.text).join("\n").trim();
+}
+async function freshSession() {
+  const s = await api("/session", { method: "POST", body: "{}" });
+  return s.id;
+}
+// 블로킹 호출 — 부분 결과(어시스턴트 텍스트)를 동기로 회수 (도구 비활성, 순수 텍스트 처리)
+async function blockingText(sid, parts, modelId) {
+  const body = JSON.stringify({ ...modelParamFor(modelId), tools: { "*": false }, parts });
+  const res = await api(`/session/${sid}/message`, { method: "POST", body });
+  return partsText(res && res.parts);
+}
+function chunkText(s, size) {
+  const out = [];
+  for (let i = 0; i < s.length; i += size) out.push(s.slice(i, i + size));
+  return out;
+}
+// 요청이 단순 분석(요약/설명)을 넘어 브라우저 "동작"을 요구하는지 대략 판정(분할 반복의 동작 턴 분리용).
+function wantsBrowserAction(text) {
+  const t = (text || "").toLowerCase();
+  const ko = ["등록", "올려", "올리", "게시", "생성", "만들", "입력", "작성", "저장", "추가", "클릭", "이동", "제출", "보내", "전송", "수정", "삭제", "변경", "검색해", "다운로드", "업로드", "채워", "선택해"];
+  const en = ["register", "create", "add ", "post ", "submit", "fill", "click", "navigate", "upload", "download", "save", "send", "edit", "delete", "update", "search for", "publish", "enter "];
+  return ko.some((k) => (text || "").includes(k)) || en.some((k) => t.includes(k));
+}
+// 부분 결과를 예산 이하로 축약(많으면 그룹 요약을 재귀적으로)
+async function reduceToBudget(userText, partials, textModelId) {
+  let blocks = partials.map((p) => `[${p.label}]\n${p.text}`);
+  let joined = blocks.join("\n\n---\n\n");
+  let guard = 0;
+  while (joined.length > SINGLE_PASS_CHARS && blocks.length > 1 && guard++ < 4) {
+    const groups = [];
+    let cur = [], curLen = 0;
+    for (const b of blocks) {
+      if (curLen + b.length > CHUNK_CHARS && cur.length) { groups.push(cur); cur = []; curLen = 0; }
+      cur.push(b); curLen += b.length;
+    }
+    if (cur.length) groups.push(cur);
+    const out = [];
+    for (let i = 0; i < groups.length; i++) {
+      setWorking(true, `중간 정리 ${i + 1}/${groups.length}…`);
+      try {
+        const sid = await freshSession();
+        const t = await blockingText(sid, [{ type: "text", text:
+          `다음 부분 결과들을 사용자 요청 관점에서 한국어로 간결히 통합 정리하라.\n\n[사용자 요청]\n${userText}\n\n${groups[i].join("\n\n---\n\n")}` }], textModelId);
+        out.push(t || groups[i].join("\n\n"));
+      } catch { out.push(groups[i].join("\n\n")); }
+    }
+    blocks = out;
+    joined = blocks.join("\n\n---\n\n");
+  }
+  return joined;
+}
+// 큰 첨부를 조각내 처리 후 종합. 최종 답은 메인 세션에서 스트리밍 렌더.
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// 메인 세션이 idle이 될 때까지 대기(직전 prompt_async 턴 완료 대기). 최대 ~5분.
+async function waitSessionIdle() {
+  await sleep(1500); // 서버가 busy로 마킹할 시간
+  for (let i = 0; i < 300; i++) {
+    let map;
+    try { map = await api("/session/status"); } catch { await sleep(1000); continue; }
+    const st = map && map[sessionID];
+    if (!(st && (st.type === "busy" || st.type === "retry"))) return;
+    await sleep(1000);
+  }
+}
+
+async function runMapReduce({ userText, basePrompt, docBlocks, imageItems, textModelId, visionModelId, toolsField, needAction }) {
+  mapReduceActive = true; // 백스톱 폴링이 스피너를 끄지 않도록
+  const units = [];
+  for (const d of docBlocks) {
+    const chunks = chunkText(d.text, CHUNK_CHARS);
+    chunks.forEach((c, k) => units.push({
+      type: "text",
+      label: chunks.length > 1 ? `${d.label} (${k + 1}/${chunks.length})` : d.label,
+      text: c,
+    }));
+  }
+  for (let i = 0; i < imageItems.length; i += PAGES_PER_BATCH) {
+    const batch = imageItems.slice(i, i + PAGES_PER_BATCH);
+    units.push({ type: "images", label: `페이지 ${i + 1}~${i + batch.length}`, images: batch });
+  }
+  const N = units.length;
+  const partials = [];
+  for (let i = 0; i < N; i++) {
+    const u = units[i];
+    setWorking(true, `자료 처리 ${i + 1}/${N}…`);
+    try {
+      const sid = await freshSession();
+      let parts, modelId;
+      if (u.type === "text") {
+        modelId = textModelId;
+        parts = [{ type: "text", text:
+          `다음은 첨부 자료의 일부다(${u.label}). 사용자 요청과 관련된 핵심 내용을 한국어로 충실히 정리하라. 이 부분에 없는 내용은 지어내지 마라.\n\n[사용자 요청]\n${userText}\n\n[자료 일부]\n${u.text}` }];
+      } else {
+        modelId = visionModelId || textModelId;
+        parts = [{ type: "text", text:
+          `다음 이미지(들)는 문서 페이지다(${u.label}). 보이는 텍스트/내용을 읽어 사용자 요청과 관련된 핵심을 한국어로 정리하라.\n\n[사용자 요청]\n${userText}` }];
+        for (const im of u.images) parts.push({ type: "file", mime: im.mime, url: im.dataUrl, filename: im.name });
+      }
+      const t = await blockingText(sid, parts, modelId);
+      partials.push({ label: u.label, text: t || "(내용 없음)" });
+    } catch (e) {
+      partials.push({ label: u.label, text: `(이 부분 처리 실패: ${(e && e.message) || e})` });
+    }
+  }
+  setWorking(true, "종합 정리 중…");
+  const reduced = await reduceToBudget(userText, partials, textModelId);
+  mapReduceActive = false; // 이후 턴은 메인 세션에서 → 정상 상태 추적 복귀
+
+  // 1) 요약 턴: 메인 세션에 렌더(도구 off). 요약이 사용자에게 보이고 세션 히스토리에 남는다.
+  const summaryPrompt = `사용자 요청: ${userText}\n\n아래는 첨부 자료를 ${N}개로 나눠 처리한 부분 결과다. 이를 종합해 한국어로 깔끔히 정리해줘. 중복은 합치고 누락 없이.\n\n${reduced}`;
+  lastSentText = summaryPrompt;
+  await api(`/session/${sessionID}/prompt_async`, {
+    method: "POST",
+    body: JSON.stringify({ ...modelParamFor(textModelId), tools: { "*": false }, parts: [{ type: "text", text: summaryPrompt }] }),
+  });
+  if (!needAction) return; // 요약만 원한 요청이면 여기서 끝
+
+  // 2) 동작 턴: 요약 덩어리를 다시 끼우지 않고(완성-모드 환각 방지) 짧고 깔끔한 동작 지시만 전송.
+  //    방금 만든 요약은 세션 히스토리에 있으므로 모델이 참조할 수 있다. → 실험2의 "깔끔한 프롬프트=실제 툴콜" 재현.
+  await waitSessionIdle();
+  setWorking(true, "동작 수행 중…");
+  const actionTurn = `${basePrompt}\n\n(바로 위에 방금 작성한 요약이 있다. 그 요약 내용을 본문/근거로 사용해 위 요청의 동작을 **실제 브라우저 도구를 호출해** 수행하라. 도구 사용을 텍스트로 흉내내지 말 것.)`;
+  lastSentText = actionTurn;
+  await api(`/session/${sessionID}/prompt_async`, {
+    method: "POST",
+    body: JSON.stringify({ ...modelParamFor(textModelId), tools: toolsField || { "*": false }, parts: [{ type: "text", text: actionTurn }] }),
+  });
+}
+
 async function send() {
   const text = els.input.value.trim();
-  if ((!text && !attachedImages.length) || !sessionID) return;
-  const userText = text || "첨부한 이미지를 분석해줘.";
-  const imgsSnapshot = attachedImages.slice();
+  if ((!text && !attachedItems.length) || !sessionID) return;
+  // 문서 추출이 끝나지 않았으면 대기 요청
+  if (attachedItems.some((i) => i.kind === "doc" && i.status === "extracting")) {
+    showNote("문서 추출이 끝난 뒤 보내주세요.");
+    return;
+  }
+  const snapshot = attachedItems.slice();
+  const imageItems = snapshot.filter((i) => i.kind === "image");
+  const docBlocks = snapshot.filter((i) => i.kind === "doc" && i.status === "ready" && i.text)
+    .map((d) => ({ label: d.name, text: d.text }));
+  const hasImages = imageItems.length > 0;
+  const hasDocs = docBlocks.length > 0;
+  const userText = text || (hasImages ? "첨부한 이미지를 분석해줘." : hasDocs ? "첨부한 문서를 요약해줘." : "");
+
   els.input.value = "";
   els.input.style.height = "auto";
-  addUserMessage(text, imgsSnapshot);
+  addUserMessage(text, snapshot);
   setWorking(true, "생각 중…");
+  // 첨부 UI 즉시 정리(스냅샷은 이미 확보)
+  attachedItems.length = 0;
+  renderThumbs();
 
-  const hasImages = imgsSnapshot.length > 0;
-  // 이미지 없는 메시지인데 비전으로 자동전환된 상태면 → 이번 전송부터 기본 모델로 복귀(VLM 불필요)
+  // 이미지 없는 메시지인데 비전으로 자동전환된 상태면 → 기본 모델로 복귀(VLM 불필요)
   if (!hasImages && autoSwitchedFrom !== null) {
     setModelSelection(autoSwitchedFrom);
     autoSwitchedFrom = null;
   }
-  // 유효 모델이 도구(tool-calling)를 지원하는지 — 이미지+도구 동시 수행 가능 여부 결정
   const toolsOn = isToolModel(effectiveModel());
-  // 도구 작업이 가능한 경우, 사용자가 보는 현재 탭을 "메인 탭"으로 그룹에 편입(새 창 X)해 그 탭에서 작업.
-  // 도구 미지원(분석 전용) 모델이면 탭을 건드리지 않고 맥락만 읽는다.
+  // 도구 작업 가능 시 현재 탭을 메인 탭으로 편입(새 창 X). 분석 전용이면 맥락만 읽음.
   await refreshActiveTab({ adopt: toolsOn });
-  // 프롬프트 구성: 텍스트 턴 / 이미지 턴을 분리한다.
-  //  - 텍스트 턴 + 도구 모델: "이 탭에서 작업" 프리픽스(브라우저 자동화가 목적).
-  //  - 이미지 턴 + 도구 모델: 첨부 이미지를 주체로, 탭은 참고로, 도구는 선택으로. (요약/분석은 도구 없이 바로,
-  //    "이미지 속 X 클릭" 같은 요청만 도구 사용 → 스크린샷을 다시 navigate/read_page로 재구성하는 오작동 방지.)
-  //  - 도구 미지원 비전 모델: raw userText(아래에서 도구 비활성).
-  let prompt = userText;
+
+  // 탭 맥락을 반영한 "동작 프롬프트"를 한 번 구성(단일/분할 양쪽에서 최종 요청에 사용).
+  const hasAttachment = hasImages || hasDocs;
+  let actionPrompt = userText;
   if (toolsOn && activeTab && activeTab.tabId != null) {
-    if (hasImages) {
-      prompt = `[참고: 현재 탭 tabId=${activeTab.tabId}, url=${activeTab.url}] 아래 요청은 첨부된 이미지에 대한 것이다. 먼저 첨부 이미지를 직접 보고 답하라. 페이지를 실제로 조작해야 하는 요청일 때만 브라우저 도구를 사용하라. 요청: ${userText}`;
+    if (hasAttachment) {
+      actionPrompt = `[참고: 현재 탭 tabId=${activeTab.tabId}, url=${activeTab.url}] 아래 첨부 자료(이미지/문서)를 활용해 요청을 수행하라. 페이지에 등록/입력/생성 등 조작이 필요하면 현재 웹앱 UI에서 브라우저 도구로 직접 수행하라. 요청: ${userText}`;
     } else {
-      prompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
+      actionPrompt = `[현재 활성 탭: tabId=${activeTab.tabId}, url=${activeTab.url}] 이 탭에서 작업해줘. 요청: ${userText}`;
     }
   }
-  lastSentText = prompt;
 
-  // 텍스트 + 첨부 이미지로 parts 구성
-  const parts = [{ type: "text", text: prompt }];
-  for (const img of imgsSnapshot) {
-    parts.push({ type: "file", mime: img.mime, url: img.dataUrl, filename: img.name });
-  }
-  // 도구 미지원 모델만 도구 비활성화(환각 방지·분석 전용). 도구 가능 모델은 켜둬 vision+tools 동시.
-  const reqBody = { ...modelParam(), parts };
-  if (!toolsOn) reqBody.tools = { "*": false };
-  const body = JSON.stringify(reqBody);
-  // 첨부 비우기(UI 즉시 정리). 모델 복귀는 전송 후.
-  attachedImages.length = 0;
-  renderThumbs();
+  // 텍스트 길이로 단일 처리 vs 분할 반복 결정 (이미지가 5장 이상이면 묶어서 반복)
+  const totalDocChars = docBlocks.reduce((n, d) => n + d.text.length, 0);
+  const needMapReduce = totalDocChars > SINGLE_PASS_CHARS || imageItems.length > 4;
+  const toolsField = toolsOn ? { ...BUILTIN_TOOLS_OFF } : { "*": false };
+  // 요청에 브라우저 "동작"이 포함되는지(요약만이 아니라) — 분할 반복 시 동작 턴 분리 여부 결정
+  const needAction = toolsOn && wantsBrowserAction(userText);
 
   els.send.disabled = true;
   setStatus("작업 중…", "ok");
   try {
-    await api(`/session/${sessionID}/prompt_async`, { method: "POST", body });
+    if (needMapReduce) {
+      // 큰 첨부 → 조각내 분석 후, 최종 단계에서 '원래 동작 요청 + 정리 결과 + 브라우저 도구'로 수행
+      const textModelId = effectiveModel();
+      const visionModelId = isVisionModel(effectiveModel()) ? effectiveModel() : firstVisionModel();
+      showNote(`첨부가 커서 ${needMapReduceUnitsHint(totalDocChars, imageItems.length)} 나눠 처리합니다…`);
+      await runMapReduce({ userText, basePrompt: actionPrompt, docBlocks, imageItems, textModelId, visionModelId, toolsField, needAction });
+    } else {
+      // 단일 처리: 동작 프롬프트 + 문서 텍스트(텍스트 파트) + 이미지(파일 파트)
+      lastSentText = actionPrompt;
+      const parts = [{ type: "text", text: actionPrompt }];
+      for (const d of docBlocks) parts.push({ type: "text", text: `[첨부 문서: ${d.label}]\n\n${d.text}` });
+      for (const im of imageItems) parts.push({ type: "file", mime: im.mime, url: im.dataUrl, filename: im.name });
+      // 도구 가능 모델: 내장 코딩 도구만 끄고 MCP 브라우저 도구는 유지. 분석 전용 모델: 모든 도구 off.
+      const reqBody = { ...modelParam(), parts, tools: toolsField };
+      await api(`/session/${sessionID}/prompt_async`, { method: "POST", body: JSON.stringify(reqBody) });
+    }
   } catch (err) {
     addError(`전송 실패: ${err.message}`);
+    setWorking(false);
   } finally {
+    mapReduceActive = false; // 안전 복구(에러 등)
     els.send.disabled = false;
     setStatus("연결됨", "ok");
-    // 전송 직후엔 복귀하지 않음 → 이미지 처리에 쓴 VLM이 드롭다운에 그대로 보임.
-    // 기본 복귀는 다음에 '이미지 없는' 메시지를 보낼 때 수행(위 send 시작부) 또는 첨부를 모두 제거할 때.
   }
+}
+function needMapReduceUnitsHint(chars, imgs) {
+  const textUnits = Math.ceil(chars / CHUNK_CHARS);
+  const imgUnits = Math.ceil(imgs / PAGES_PER_BATCH);
+  return `약 ${textUnits + imgUnits}개로`;
 }
 
 // ---------- 초기화 ----------
@@ -544,7 +787,7 @@ els.modelSelect.addEventListener("change", () => {
 // 이미지 첨부: 버튼 / 파일선택 / 붙여넣기 / 드래그앤드롭
 els.attachBtn.addEventListener("click", () => els.fileInput.click());
 els.fileInput.addEventListener("change", () => {
-  if (els.fileInput.files && els.fileInput.files.length) addImages(els.fileInput.files);
+  if (els.fileInput.files && els.fileInput.files.length) addFiles(els.fileInput.files);
   els.fileInput.value = "";
 });
 els.input.addEventListener("paste", (e) => {
@@ -554,14 +797,14 @@ els.input.addEventListener("paste", (e) => {
   for (const it of items) {
     if (it.kind === "file") { const f = it.getAsFile(); if (f) files.push(f); }
   }
-  if (files.length) { e.preventDefault(); addImages(files); }
+  if (files.length) { e.preventDefault(); addFiles(files); }
 });
 document.addEventListener("dragover", (e) => { e.preventDefault(); document.body.classList.add("dragover"); });
 document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) document.body.classList.remove("dragover"); });
 document.addEventListener("drop", (e) => {
   e.preventDefault();
   document.body.classList.remove("dragover");
-  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addImages(e.dataTransfer.files);
+  if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
 
 // ---------- 실행 모드 (실행 전 확인 / 묻지 않고 실행) ----------

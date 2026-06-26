@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-**Open Claude in Chrome** — a clean-room reimplementation of Anthropic's "Claude in Chrome" browser extension that removes the 58-domain blocklist and works on any Chromium browser (Chrome, Edge, Brave, Arc, Opera, Vivaldi). It exposes the same 18 MCP tools and is meant to match the official extension's behavior/output formats exactly. MIT licensed.
+**Byside** (formerly "Open Claude in Chrome") — a clean-room reimplementation of Anthropic's "Claude in Chrome" browser extension that removes the 58-domain blocklist and works on any Chromium browser (Chrome, Edge, Brave, Arc, Opera, Vivaldi). It exposes the same 18 MCP tools and is meant to match the official extension's behavior/output formats exactly. MIT licensed.
 
 There is **no build step** — every file is plain JavaScript (ES modules in `host/`, classic scripts in `extension/`).
 
